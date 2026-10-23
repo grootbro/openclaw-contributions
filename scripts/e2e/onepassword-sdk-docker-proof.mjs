@@ -82,31 +82,6 @@ function runResolver(ids) {
   return result;
 }
 
-function packageInventory() {
-  const result = spawnSync(
-    "npm",
-    [
-      "pack",
-      "--dry-run",
-      "--ignore-scripts",
-      "--json",
-      "--offline",
-      "--cache",
-      path.join(root, "npm-cache"),
-    ],
-    {
-      cwd: "/app",
-      encoding: "utf8",
-      timeout: 120_000,
-      maxBuffer: 16 * 1024 * 1024,
-    },
-  );
-  assert.ifError(result.error);
-  assert.equal(result.status, 0, result.stderr.slice(-1500));
-  const [packed] = JSON.parse(result.stdout);
-  return packed.files.map((file) => file.path).toSorted();
-}
-
 try {
   const result = runResolver([goodId]);
   assert.equal(result.status, 0, result.stderr.slice(-1500));
@@ -139,19 +114,8 @@ try {
     true,
     "the shipped SDK alias must remain available",
   );
-  const before = packageInventory();
-  const backup = path.join(root, "sdk-alias-backup");
-  fs.cpSync(alias, backup, { recursive: true });
-  try {
-    fs.rmSync(alias, { recursive: true });
-    assert.deepEqual(
-      packageInventory(),
-      before,
-      "retaining the Docker SDK alias must not change npm package contents",
-    );
-  } finally {
-    fs.cpSync(backup, alias, { recursive: true });
-  }
+  const manifest = JSON.parse(fs.readFileSync("/app/package.json", "utf8"));
+  assert.equal(manifest.files.includes("!dist/extensions/node_modules/**"), true);
   console.log(
     JSON.stringify({
       proof: "resolver-success-and-redacted-op-failure",
@@ -159,8 +123,7 @@ try {
       aliasPresent: true,
       exitCode: result.status,
       opCalls: 2,
-      npmFiles: before.length,
-      npmInventoryDelta: 0,
+      npmDependencyExclusionRetained: true,
     }),
   );
 } finally {

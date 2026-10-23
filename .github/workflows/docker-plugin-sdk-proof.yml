@@ -2,7 +2,7 @@ name: Docker plugin SDK alias proof
 
 on:
   push:
-    branches: [fix/docker-plugin-sdk-alias]
+    branches: [fix/docker-plugin-sdk-alias, proof/docker-plugin-sdk-alias]
   workflow_dispatch:
 
 permissions:
@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   focused-owner:
+    if: github.ref == 'refs/heads/fix/docker-plugin-sdk-alias'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -41,9 +42,8 @@ jobs:
           pnpm docs:list
 
   official-image:
-    # Image proof is already pinned to the production fix. Formatting/lint-only
-    # pushes need tooling checks; dispatch this job again if image inputs change.
-    if: github.event_name == 'workflow_dispatch'
+    # Keep image acceptance on the public proof ref; ordinary fixes run tooling checks.
+    if: github.ref == 'refs/heads/proof/docker-plugin-sdk-alias' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
