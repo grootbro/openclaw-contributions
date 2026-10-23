@@ -16,6 +16,7 @@ import type {
 import { iterateUnindexedActiveTranscriptNavigation } from "./session-accessor.sqlite-history-navigation.js";
 import {
   getActiveTranscriptKysely,
+  selectActiveTranscriptIdentityRows,
   type CurrentTranscriptProjection,
 } from "./session-accessor.sqlite-projection-read.js";
 import {
@@ -73,16 +74,9 @@ function readBoundedRetentionRanges(
   );
   if (missing.length > 0) {
     const lastSelectedSeq = rows.reduce((maximum, row) => Math.max(maximum, row.seq), -Infinity);
-    const db = getActiveTranscriptKysely(projection.database);
     const anchors = executeSqliteQuerySync(
       projection.database.db,
-      db
-        .selectFrom("transcript_event_identities as identity")
-        .innerJoin("session_transcript_active_events as active", (join) =>
-          join
-            .onRef("active.session_id", "=", "identity.session_id")
-            .onRef("active.event_seq", "=", "identity.seq"),
-        )
+      selectActiveTranscriptIdentityRows(projection.database)
         .select(["identity.event_id", "identity.seq"])
         .where("identity.session_id", "=", projection.resolved.sessionId)
         .where("identity.event_id", "in", missing)
@@ -418,13 +412,7 @@ export function readSessionTranscriptBoundedActiveContextCore(
           projection.database.db,
           db
             .selectFrom(
-              db
-                .selectFrom("transcript_event_identities as identity")
-                .innerJoin("session_transcript_active_events as active", (join) =>
-                  join
-                    .onRef("active.session_id", "=", "identity.session_id")
-                    .onRef("active.event_seq", "=", "identity.seq"),
-                )
+              selectActiveTranscriptIdentityRows(projection.database)
                 .select((eb) => [
                   "active.active_position",
                   "identity.seq",

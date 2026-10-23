@@ -131,6 +131,16 @@ export function getActiveTranscriptKysely(database: Pick<TranscriptReadDatabase,
   return getNodeSqliteKysely<ActiveTranscriptDatabase>(database.db);
 }
 
+export function selectActiveTranscriptIdentityRows(database: Pick<TranscriptReadDatabase, "db">) {
+  return getActiveTranscriptKysely(database)
+    .selectFrom("transcript_event_identities as identity")
+    .innerJoin("session_transcript_active_events as active", (join) =>
+      join
+        .onRef("active.session_id", "=", "identity.session_id")
+        .onRef("active.event_seq", "=", "identity.seq"),
+    );
+}
+
 /** Materialize only physical events already selected in the caller's admitted snapshot. */
 export function readSnapshotEventRows(
   projection: CurrentTranscriptProjection,

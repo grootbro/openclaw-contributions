@@ -23,6 +23,7 @@ import type {
 } from "./session-accessor.sqlite-history-navigation.types.js";
 import {
   getActiveTranscriptKysely,
+  selectActiveTranscriptIdentityRows,
   getMessageRangeReaders,
   selectMessageRows,
   selectMessagePayload,
@@ -341,13 +342,7 @@ function findLatestResetMessageWindow(
   if (typeof boundary.firstKeptEntryId === "string") {
     const indexedFirstKept = executeSqliteQueryTakeFirstSync(
       projection.database.db,
-      db
-        .selectFrom("transcript_event_identities as identity")
-        .innerJoin("session_transcript_active_events as active", (join) =>
-          join
-            .onRef("active.session_id", "=", "identity.session_id")
-            .onRef("active.event_seq", "=", "identity.seq"),
-        )
+      selectActiveTranscriptIdentityRows(projection.database)
         .select("active.active_position")
         .where("identity.session_id", "=", projection.resolved.sessionId)
         .where("identity.event_id", "=", boundary.firstKeptEntryId)
