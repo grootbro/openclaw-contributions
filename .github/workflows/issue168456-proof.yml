@@ -1,0 +1,50 @@
+name: Issue 168456 current-main reproduction
+on:
+  push:
+    branches: [fix/fallback-transcript-key]
+permissions:
+  contents: read
+jobs:
+  reproduce:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      OPENCLAW_VITEST_RUNTIME: node
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-node-env
+        with:
+          node-version: 26.12.1
+          install-bun: "false"
+          cache-mode: "off"
+      - name: Existing real cron timeout regression on unchanged main
+        run: node scripts/run-vitest.mjs src/cron/isolated-agent/run.fallback-transcript.test.ts --maxWorkers=1
+      - name: Gateway reproduction with default context engine
+        if: always()
+        run: node scripts/run-vitest.mjs test/issue168456-current-main.e2e.test.ts --maxWorkers=1
+      - name: Prepare pinned Lossless Claw package without scripts
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/issue168456-lossless"
+          npm pack @martian-engineering/lossless-claw@1.2.0 --ignore-scripts --pack-destination "$RUNNER_TEMP/issue168456-lossless" --json > "$RUNNER_TEMP/issue168456-lossless/package-receipt.json"
+          python3 - <<'PYINTEGRITY'
+          import base64,hashlib,json,os
+          from pathlib import Path
+          root=Path(os.environ['RUNNER_TEMP'])/'issue168456-lossless'
+          receipt=json.loads((root/'package-receipt.json').read_text())[0]
+          expected='sha512-xC2b8bp72tsUKB1iqKN5TYiCJoHW9rAVdMSdY0cjJuxR+6irVUwvW2ziFfYOL/qCTi4DHr3eUCgDIcTzhuifYA=='
+          tarball=root/receipt['filename']
+          actual='sha512-'+base64.b64encode(hashlib.sha512(tarball.read_bytes()).digest()).decode()
+          assert actual==expected, 'Lossless package integrity mismatch'
+          print('Lossless package 1.2.0 verified:',actual)
+          PYINTEGRITY
+          tar -xzf "$RUNNER_TEMP/issue168456-lossless/lossless-claw-1.2.0.tgz" -C "$RUNNER_TEMP/issue168456-lossless"
+          echo "ISSUE168456_LOSSLESS_PLUGIN=$RUNNER_TEMP/issue168456-lossless/package" >> "$GITHUB_ENV"
+      - name: Gateway reproduction with actual Lossless Claw
+        if: always()
+        env:
+          ISSUE168456_REQUIRE_LOSSLESS: "1"
+        run: node scripts/run-vitest.mjs test/issue168456-current-main.e2e.test.ts --maxWorkers=1
