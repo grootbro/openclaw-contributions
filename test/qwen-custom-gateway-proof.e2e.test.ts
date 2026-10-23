@@ -92,6 +92,7 @@ it("proves custom Qwen thinking and tool replay through a real Gateway", { timeo
     }, (request, response) => {
       void (async () => {
         if (request.method !== "POST" || request.url !== "/compatible-mode/v1/chat/completions") {
+          handlerErrors.push(`unexpected-http:${request.method}:${request.url?.split("?")[0]}`);
           response.writeHead(404); response.end(); return;
         }
         const chunks: Buffer[] = [];
@@ -109,8 +110,8 @@ it("proves custom Qwen thinking and tool replay through a real Gateway", { timeo
         } else {
           writeNativeCompletion(response, "proof-final", body.model ?? "unknown", off ? "QWEN_OFF_OK" : token ? "QWEN_TOOL_OK" : "QWEN_STANDARD_OK");
         }
-      })().catch(() => {
-        handlerErrors.push("provider-handler-failed");
+      })().catch((error: unknown) => {
+        handlerErrors.push(`provider-handler-failed:${String(error)}`);
         if (!response.headersSent) response.writeHead(500);
         response.end();
       });
@@ -166,11 +167,19 @@ it("proves custom Qwen thinking and tool replay through a real Gateway", { timeo
     };
     const run = async (sessionKey: string, message: string, thinking: string) => {
       activeSessionKey = sessionKey;
+      const wireStart = wire.length;
       const accepted = await client!.request<{ runId: string }>("agent", { sessionKey, message, thinking, deliver: false, idempotencyKey: randomUUID(), timeout: 60 });
       activeRun = accepted.runId;
-      const terminal = await client!.request<{ status: string }>("agent.wait", { runId: activeRun, timeoutMs: 75_000 });
+      const terminal = await client!.request<{ status: string; error?: string; stopReason?: string; providerStarted?: boolean }>("agent.wait", { runId: activeRun, timeoutMs: 75_000 });
       activeRun = undefined;
       activeSessionKey = undefined;
+      console.log("QWEN_RUN_RESULT", JSON.stringify({
+        phase: message.split(":")[0], thinking, status: terminal.status,
+        error: terminal.error?.replaceAll(fixturePath, "<fixture-file>"),
+        stopReason: terminal.stopReason, providerStarted: terminal.providerStarted,
+        models: wire.slice(wireStart).map(request => request.model),
+        connectTargets, handlerErrors,
+      }));
       expect(terminal.status, "Gateway terminal status").toBe("ok");
       return await client!.request<{ messages: Array<{ role?: string; content?: unknown }> }>("chat.history", { sessionKey, limit: 100 });
     };
