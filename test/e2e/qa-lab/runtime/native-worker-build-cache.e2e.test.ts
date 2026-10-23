@@ -8,8 +8,8 @@ import type { AgentJobTerminalSnapshot } from "../../../../src/gateway/agent-tur
 import { loadOrCreateDeviceIdentity } from "../../../../src/infra/device-identity.js";
 import { NODE_WORKER_SUPERVISOR_LAUNCH_COMMAND } from "../../../../src/infra/node-commands.js";
 import { parseNodeWorkerLaunchInput } from "../../../../src/worker/node-supervisor-protocol.js";
-import { runQaGatewayTestFixture } from "../../../helpers/qa-gateway-test-lifetime.js";
 import { stopQaGatewayFixture } from "../../../helpers/qa-gateway-cleanup.js";
+import { runQaGatewayTestFixture } from "../../../helpers/qa-gateway-test-lifetime.js";
 import { MODEL_REF, PROOF_TIMEOUT_MS } from "./cloud-worker-midturn-loss-fixture.js";
 import {
   closeNativeProvider,
@@ -53,7 +53,9 @@ async function git(cwd: string, ...args: string[]) {
 it.skipIf(process.platform !== "linux")(
   "reconciles authored cache-root edits after a native tool creates unreadable disposable build caches",
   async (context) => {
-    expect(process.getuid?.(), "permission proof requires an unprivileged Linux runner").not.toBe(0);
+    expect(process.getuid?.(), "permission proof requires an unprivileged Linux runner").not.toBe(
+      0,
+    );
     const owner = createQaGatewayChild();
     let published: Awaited<ReturnType<typeof createPublishedWireWorkspace>> | undefined;
     let node: PairedNodeWorkerHost | undefined;
@@ -92,12 +94,17 @@ it.skipIf(process.platform !== "linux")(
             modelId!,
             {
               role: "assistant",
-              tool_calls: [{
-                index: 0,
-                id: "nativecacheexec",
-                type: "function",
-                function: { name: "exec", arguments: JSON.stringify({ command, yieldMs: 10_000 }) },
-              }],
+              tool_calls: [
+                {
+                  index: 0,
+                  id: "nativecacheexec",
+                  type: "function",
+                  function: {
+                    name: "exec",
+                    arguments: JSON.stringify({ command, yieldMs: 10_000 }),
+                  },
+                },
+              ],
             },
             "tool_calls",
           );
@@ -147,7 +154,7 @@ it.skipIf(process.platform !== "linux")(
           fullAccess: true,
           mutateConfig: (config) => ({
             ...config,
-            agents: { ...config.agents, defaults: { ...config.agents?.defaults, memorySearch: { enabled: false } } },
+            memory: { ...config.memory, search: { ...config.memory?.search, enabled: false } },
           }),
           command: {
             executablePath: process.execPath,
@@ -156,7 +163,12 @@ it.skipIf(process.platform !== "linux")(
           },
         });
         const settlement = createWireWorkspaceSettlementWaiter();
-        operator = await connectWireClient({ gateway, role: "operator", identity: null, onEvent: settlement.onEvent });
+        operator = await connectWireClient({
+          gateway,
+          role: "operator",
+          identity: null,
+          onEvent: settlement.onEvent,
+        });
         await operator.request("sessions.subscribe", {});
         node = await createPairedNodeWorkerHost({
           gateway,
@@ -164,14 +176,22 @@ it.skipIf(process.platform !== "linux")(
           root,
           capacity: 1,
           nodeConfig: {
-            models: { providers: { [providerId!]: {
-              apiKey: "synthetic-native-cache-key",
-              api: "openai-completions",
-              baseUrl: providerBaseUrl,
-                models: [nativeModel(modelId!, {
-                  maxTokens: 128, reasoning: true, thinkingLevelMap: { medium: "medium" },
-                })],
-            } } },
+            models: {
+              providers: {
+                [providerId!]: {
+                  apiKey: "synthetic-native-cache-key",
+                  api: "openai-completions",
+                  baseUrl: providerBaseUrl,
+                  models: [
+                    nativeModel(modelId!, {
+                      maxTokens: 128,
+                      reasoning: true,
+                      thinkingLevelMap: { medium: "medium" },
+                    }),
+                  ],
+                },
+              },
+            },
           },
         });
         expect(node.identity.deviceId).toBe(identity.deviceId);
@@ -183,30 +203,51 @@ it.skipIf(process.platform !== "linux")(
           worktreeBaseRef: "main",
           cwd: published.source,
         });
-        const dispatched = await operator.request<{ placement: {
-          state: string; workspaceBaseManifestRef: string;
-        } }>("sessions.dispatch", { key: KEY, profileId: "native" }, { timeoutMs: PROOF_TIMEOUT_MS });
+        const dispatched = await operator.request<{
+          placement: {
+            state: string;
+            workspaceBaseManifestRef: string;
+          };
+        }>("sessions.dispatch", { key: KEY, profileId: "native" }, { timeoutMs: PROOF_TIMEOUT_MS });
         expect(dispatched.placement.state).toBe("active");
-        expect(await operator.request("chat.send", {
-          sessionKey: KEY,
-          message: "Run the synthetic build-cache operation, then report its completion.",
-          deliver: false,
-          idempotencyKey: RUN_ID,
-        })).toMatchObject({ runId: RUN_ID, status: "started" });
-        const terminal = await operator.request<AgentJobTerminalSnapshot>("agent.wait", {
-          runId: RUN_ID, timeoutMs: PROOF_TIMEOUT_MS,
-        }, { timeoutMs: PROOF_TIMEOUT_MS + 5_000 });
+        expect(
+          await operator.request("chat.send", {
+            sessionKey: KEY,
+            message: "Run the synthetic build-cache operation, then report its completion.",
+            deliver: false,
+            idempotencyKey: RUN_ID,
+          }),
+        ).toMatchObject({ runId: RUN_ID, status: "started" });
+        const terminal = await operator.request<AgentJobTerminalSnapshot>(
+          "agent.wait",
+          {
+            runId: RUN_ID,
+            timeoutMs: PROOF_TIMEOUT_MS,
+          },
+          { timeoutMs: PROOF_TIMEOUT_MS + 5_000 },
+        );
         console.info("native-build-cache", {
           terminalStatus: terminal.status,
           terminalError: terminal.error?.slice(0, 600),
           providerRequests,
           gatewayRequests,
           unreadableFiles: workerReceipt?.denied.length ?? 0,
-          launches: node.frames.filter((frame) => frame.command === NODE_WORKER_SUPERVISOR_LAUNCH_COMMAND).map((frame) => {
-            const launch = parseNodeWorkerLaunchInput(frame.paramsJSON);
-            return { runId: launch.descriptor.assignment.runId, inference: launch.descriptor.assignment.inference, modelRef: launch.descriptor.assignment.modelRef };
-          }),
-          captureErrors: gateway.logs().split("\n").filter((line) => /EACCES|permission denied|inference|profile|error|fail/iu.test(line)).map((line) => line.slice(0, 350)).slice(-12),
+          launches: node.frames
+            .filter((frame) => frame.command === NODE_WORKER_SUPERVISOR_LAUNCH_COMMAND)
+            .map((frame) => {
+              const launch = parseNodeWorkerLaunchInput(frame.paramsJSON);
+              return {
+                runId: launch.descriptor.assignment.runId,
+                inference: launch.descriptor.assignment.inference,
+                modelRef: launch.descriptor.assignment.modelRef,
+              };
+            }),
+          captureErrors: gateway
+            .logs()
+            .split("\n")
+            .filter((line) => /EACCES|permission denied|inference|profile|error|fail/iu.test(line))
+            .map((line) => line.slice(0, 350))
+            .slice(-12),
         });
         expect(terminal).toMatchObject({ status: "ok" });
         expect(providerErrors).toEqual([]);
@@ -225,19 +266,35 @@ it.skipIf(process.platform !== "linux")(
           console.info("native-build-cache-settlement-failed", {
             providerRequests,
             unreadableFiles: workerReceipt?.denied.length ?? 0,
-            captureErrors: gateway.logs().split("\n").filter((line) => /EACCES|permission denied|workspace.*(?:fail|error)/iu.test(line)).map((line) => line.slice(0, 350)).slice(-6),
+            captureErrors: gateway
+              .logs()
+              .split("\n")
+              .filter((line) => /EACCES|permission denied|workspace.*(?:fail|error)/iu.test(line))
+              .map((line) => line.slice(0, 350))
+              .slice(-6),
           });
           throw error;
         }
         await node.waitForWorkersIdle();
-        await vi.waitFor(async () => {
-          expect(await fs.readFile(path.join(created.worktree.path, AUTHORED), "utf8")).toBe("authored edit survives\n");
-          expect(await fs.readFile(path.join(created.worktree.path, REPORT), "utf8")).toBe("useful report survives\n");
-        }, { timeout: 10_000 });
+        await vi.waitFor(
+          async () => {
+            expect(await fs.readFile(path.join(created.worktree.path, AUTHORED), "utf8")).toBe(
+              "authored edit survives\n",
+            );
+            expect(await fs.readFile(path.join(created.worktree.path, REPORT), "utf8")).toBe(
+              "useful report survives\n",
+            );
+          },
+          { timeout: 10_000 },
+        );
         for (const generated of GENERATED) {
-          await expect(fs.stat(path.join(created.worktree.path, generated))).rejects.toMatchObject({ code: "ENOENT" });
+          await expect(fs.stat(path.join(created.worktree.path, generated))).rejects.toMatchObject({
+            code: "ENOENT",
+          });
         }
-        const history = await operator.request<{ messages: unknown[] }>("chat.history", { sessionKey: KEY });
+        const history = await operator.request<{ messages: unknown[] }>("chat.history", {
+          sessionKey: KEY,
+        });
         expect(history.messages.map(wireMessageText)).toContain(ANSWER);
         expect(node.invokeErrors).toEqual([]);
       },
@@ -247,9 +304,13 @@ it.skipIf(process.platform !== "linux")(
         await node?.stop();
         if (workerReceipt) {
           for (const generated of GENERATED) {
-            await fs.chmod(path.join(workerReceipt.cwd, generated), 0o600).catch((error: unknown) => {
-              if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-            });
+            await fs
+              .chmod(path.join(workerReceipt.cwd, generated), 0o600)
+              .catch((error: unknown) => {
+                if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+                  throw error;
+                }
+              });
           }
         }
       },
@@ -257,7 +318,7 @@ it.skipIf(process.platform !== "linux")(
       () => stopQaGatewayFixture(owner),
       () => closeNativeProvider(provider),
       () => closeNativeProvider(forbiddenGatewayProvider),
-      () => published ? closeWireServer(published.server) : undefined,
+      () => (published ? closeWireServer(published.server) : undefined),
     );
   },
   PROOF_TIMEOUT_MS + 180_000,

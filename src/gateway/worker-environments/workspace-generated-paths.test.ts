@@ -189,12 +189,17 @@ it.each(["all", "eligible"])(
       [authored]: "original authored input\n",
     });
     const base = await initializeScriptGitWorkspace(fixture.workspace, ".");
-    await writeWorkspaceFiles(fixture.workspace, { [transferred]: "host input absent from worker index\n" });
+    await writeWorkspaceFiles(fixture.workspace, {
+      [transferred]: "host input absent from worker index\n",
+    });
     const initial = await fixture.runManifest([base, "eligible"]);
     expect(initial.code, initial.stderr).toBe(0);
     const initialManifest = await fixture.readManifest(initial.stdout.trim());
     expect(initialManifest.entries.map((entry) => entry.path)).toContain(transferred);
-    const removed = await runCommandWithTimeout(["git", "-C", fixture.workspace, "rm", "--cached", authored], { timeoutMs: 10_000 });
+    const removed = await runCommandWithTimeout(
+      ["git", "-C", fixture.workspace, "rm", "--cached", authored],
+      { timeoutMs: 10_000 },
+    );
     expect(removed.code, removed.stderr).toBe(0);
     await writeWorkspaceFiles(fixture.workspace, {
       [authored]: "authored edit\n",
@@ -218,7 +223,14 @@ it.each(["all", "eligible"])(
     expect(captured.code, captured.stderr).toBe(0);
     const manifest = await fixture.readManifest(captured.stdout.trim());
     expect(manifest.entries.map((entry) => entry.path)).toEqual(
-      expect.arrayContaining([authored, transferred, selected, staged, ".artifacts/report.md", "source.txt"]),
+      expect.arrayContaining([
+        authored,
+        transferred,
+        selected,
+        staged,
+        ".artifacts/report.md",
+        "source.txt",
+      ]),
     );
     expect(manifest.entries.some((entry) => generated.includes(entry.path))).toBe(false);
     if (process.platform === "linux" && process.getuid?.() !== 0) {
