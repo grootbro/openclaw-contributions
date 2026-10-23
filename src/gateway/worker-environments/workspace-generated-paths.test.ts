@@ -172,3 +172,53 @@ it.each([false, true])("projects historical cache receipts (report: %s)", async 
     current.rawManifest,
   );
 });
+
+it.each(["all", "eligible"])(
+  "excludes unreadable build outputs while retaining authored inputs in %s remote capture",
+  async (mode) => {
+    const authored = ".artifacts/build-all-cache/authored.txt";
+    const selected = ".artifacts/build-cache-inputs/selected.txt";
+    const generated = [
+      ".artifacts/build-all-cache/generated/output.js",
+      ".artifacts/build-cache-inputs/generated/receipt.json",
+    ];
+    const fixture = await makeWorkspace({
+      "source.txt": "source\n",
+      [authored]: "original authored input\n",
+    });
+    const base = await initializeScriptGitWorkspace(fixture.workspace, ".");
+    const initial = await fixture.runManifest([base, "eligible"]);
+    expect(initial.code, initial.stderr).toBe(0);
+    await writeWorkspaceFiles(fixture.workspace, {
+      [authored]: "authored edit\n",
+      [selected]: "explicitly included input\n",
+      ".gitignore": `${selected}\n`,
+      ".worktreeinclude": `${selected}\n`,
+      ".artifacts/report.md": "useful report\n",
+      ...Object.fromEntries(generated.map((name) => [name, "disposable build output\n"])),
+    });
+    if (process.platform !== "win32") {
+      for (const name of generated) {
+        await fs.chmod(path.join(fixture.workspace, name), 0);
+      }
+    }
+    const captured = await fixture.runManifest([base, mode, initial.stdout.trim().slice(7)]);
+    expect(captured.code, captured.stderr).toBe(0);
+    const manifest = await fixture.readManifest(captured.stdout.trim());
+    expect(manifest.entries.map((entry) => entry.path)).toEqual(
+      expect.arrayContaining([authored, selected, ".artifacts/report.md", "source.txt"]),
+    );
+    expect(manifest.entries.some((entry) => generated.includes(entry.path))).toBe(false);
+    if (process.platform === "linux" && process.getuid?.() !== 0) {
+      const report = path.join(fixture.workspace, ".artifacts/report.md");
+      await fs.chmod(report, 0);
+      try {
+        const denied = await fixture.runManifest([base, mode, captured.stdout.trim().slice(7)]);
+        expect(denied.code).not.toBe(0);
+        expect(denied.stderr).toContain("EACCES");
+      } finally {
+        await fs.chmod(report, 0o600);
+      }
+    }
+  },
+);

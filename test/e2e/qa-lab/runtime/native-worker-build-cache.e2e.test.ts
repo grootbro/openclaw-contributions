@@ -6,6 +6,8 @@ import { expect, it, vi } from "vitest";
 import { createQaGatewayChild } from "../../../../extensions/qa-lab/api.js";
 import type { AgentJobTerminalSnapshot } from "../../../../src/gateway/agent-turn/types.js";
 import { loadOrCreateDeviceIdentity } from "../../../../src/infra/device-identity.js";
+import { NODE_WORKER_SUPERVISOR_LAUNCH_COMMAND } from "../../../../src/infra/node-commands.js";
+import { parseNodeWorkerLaunchInput } from "../../../../src/worker/node-supervisor-protocol.js";
 import { runQaGatewayTestFixture } from "../../../helpers/qa-gateway-test-lifetime.js";
 import { stopQaGatewayFixture } from "../../../helpers/qa-gateway-cleanup.js";
 import { MODEL_REF, PROOF_TIMEOUT_MS } from "./cloud-worker-midturn-loss-fixture.js";
@@ -162,7 +164,9 @@ it.skipIf(process.platform !== "linux")(
               apiKey: "synthetic-native-cache-key",
               api: "openai-completions",
               baseUrl: providerBaseUrl,
-              models: [nativeModel(modelId!)],
+                models: [nativeModel(modelId!, {
+                  maxTokens: 128, reasoning: true, thinkingLevelMap: { medium: "medium" },
+                })],
             } } },
           },
         });
@@ -190,10 +194,15 @@ it.skipIf(process.platform !== "linux")(
         }, { timeoutMs: PROOF_TIMEOUT_MS + 5_000 });
         console.info("native-build-cache", {
           terminalStatus: terminal.status,
+          terminalError: terminal.error?.slice(0, 600),
           providerRequests,
           gatewayRequests,
           unreadableFiles: workerReceipt?.denied.length ?? 0,
-          captureErrors: gateway.logs().split("\n").filter((line) => /EACCES|permission denied|workspace.*(?:fail|error)/iu.test(line)).map((line) => line.slice(0, 350)).slice(-6),
+          launches: node.frames.filter((frame) => frame.command === NODE_WORKER_SUPERVISOR_LAUNCH_COMMAND).map((frame) => {
+            const launch = parseNodeWorkerLaunchInput(frame.paramsJSON);
+            return { runId: launch.descriptor.assignment.runId, inference: launch.descriptor.assignment.inference, modelRef: launch.descriptor.assignment.modelRef };
+          }),
+          captureErrors: gateway.logs().split("\n").filter((line) => /EACCES|permission denied|inference|profile|error|fail/iu.test(line)).map((line) => line.slice(0, 350)).slice(-12),
         });
         expect(terminal).toMatchObject({ status: "ok" });
         expect(providerErrors).toEqual([]);

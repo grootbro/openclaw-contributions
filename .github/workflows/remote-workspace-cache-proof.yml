@@ -5,6 +5,22 @@ on:
 permissions:
   contents: read
 jobs:
+  capture-owner:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      OPENCLAW_VITEST_RUNTIME: node
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-node-env
+        with:
+          node-version: 26.12.1
+          install-bun: "false"
+          cache-mode: "off"
+      - name: Exercise the actual standalone remote capture owner
+        run: node scripts/run-vitest.mjs src/gateway/worker-environments/workspace-generated-paths.test.ts --maxWorkers=1 -t "excludes unreadable build outputs"
   gateway-native-worker:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
