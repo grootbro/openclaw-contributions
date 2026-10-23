@@ -97,12 +97,14 @@ describe.skipIf(process.platform === "win32")("Doctor native repair authority or
       blockedTarget,
       custodyLoss,
       runtimeRepair,
+      systemNodeVersion,
     }: {
       tokenPresent?: boolean;
       update?: boolean;
       blockedTarget?: "installed" | "planned";
       custodyLoss?: CustodyLoss;
       runtimeRepair?: "secret" | "PATH" | "launcher";
+      systemNodeVersion?: string;
     } = {},
   ) {
     state = await createOpenClawTestState({ prefix: "doctor-authority-" });
@@ -132,6 +134,7 @@ describe.skipIf(process.platform === "win32")("Doctor native repair authority or
     const packageRoot = path.join(root, "node_modules/openclaw");
     const entrypoint = path.join(packageRoot, "dist/index.js");
     const oldNode = "/nix/store/fixture-nodejs-24.20.0/bin/node";
+    const systemNode = "/usr/local/bin/node";
     if (runtimeRepair) {
       const cliNode = path.join(root, "current/bin/node");
       await fs.mkdir(path.dirname(cliNode), { recursive: true });
@@ -192,6 +195,22 @@ describe.skipIf(process.platform === "win32")("Doctor native repair authority or
 
     // Model one synthetic OS account; the real install-identity guard still runs.
     mockDoctorServicePlatform("linux");
+    if (runtimeRepair) {
+      const access = fs.access.bind(fs);
+      vi.spyOn(fs, "access").mockImplementation(async (...args) => {
+        if (args[0] === systemNode || args[0] === "/usr/bin/node") {
+          if (args[0] === systemNode && systemNodeVersion) {
+            return;
+          }
+          throw Object.assign(new Error("No fixture system Node"), { code: "ENOENT" });
+        }
+        return access(...args);
+      });
+      const realpath = fs.realpath.bind(fs);
+      vi.spyOn(fs, "realpath").mockImplementation(async (...args) =>
+        args[0] === systemNode ? systemNode : realpath(...args),
+      );
+    }
     vi.spyOn(os, "homedir").mockReturnValue(home);
     vi.spyOn(os, "userInfo").mockReturnValue({
       homedir: home,
@@ -279,7 +298,8 @@ describe.skipIf(process.platform === "win32")("Doctor native repair authority or
       }
       return {
         stdout: JSON.stringify({
-          nodeVersion: file === oldNode ? "24.20.0" : "26.12.1",
+          nodeVersion:
+            file === systemNode ? systemNodeVersion : file === oldNode ? "24.20.0" : "26.12.1",
           sqliteVersion: "3.51.3",
           sqliteProbe: { available: true, version: "3.51.3", text: true, blob: true, json: true },
         }),
@@ -543,12 +563,19 @@ describe.skipIf(process.platform === "win32")("Doctor native repair authority or
     );
   }
 
-  it.each(["secret", "PATH", "launcher"] as const)(
-    "repairs incompatible Node without taking over %s drop-in settings",
-    async (runtimeRepair) => {
+  it.each([
+    { runtimeRepair: "secret", systemNodeVersion: undefined, selectedNode: "cli" },
+    { runtimeRepair: "secret", systemNodeVersion: "24.20.0", selectedNode: "cli" },
+    { runtimeRepair: "secret", systemNodeVersion: "26.12.1", selectedNode: "/usr/local/bin/node" },
+    { runtimeRepair: "PATH", systemNodeVersion: undefined, selectedNode: undefined },
+    { runtimeRepair: "launcher", systemNodeVersion: undefined, selectedNode: undefined },
+  ] as const)(
+    "repairs incompatible Node without taking over $runtimeRepair drop-in settings (system Node: $systemNodeVersion)",
+    async ({ runtimeRepair, systemNodeVersion, selectedNode }) => {
       const { observations, diagnostics, errors } = await runRepair("writable", {
         tokenPresent: true,
         runtimeRepair,
+        systemNodeVersion,
       });
       expect(errors).toEqual([]);
       expect(observations.configBytesPreserved).toBe(true);
@@ -558,7 +585,9 @@ describe.skipIf(process.platform === "win32")("Doctor native repair authority or
         expect(observations.nativeActions).toEqual([]);
         expect(diagnostics).toContain("operator-owned");
       } else {
-        expect(observations.unit).toContain(`ExecStart=${process.execPath} `);
+        expect(observations.unit).toContain(
+          `ExecStart=${selectedNode === "cli" ? process.execPath : selectedNode} `,
+        );
         expect(observations.backup).toBe(observations.originalUnit);
         expect(observations.unitBytesPreserved).toBe(false);
         expect(observations.nativeActions).toEqual(["daemon-reload", "enable", "restart"]);

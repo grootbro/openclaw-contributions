@@ -174,6 +174,7 @@ export async function canRepairRuntime(
   command: GatewayServiceCommandConfig,
   plan: GatewayInstallPlan,
   layout: GatewayServiceLayoutSummary | undefined,
+  platform: NodeJS.Platform,
 ): Promise<boolean> {
   const runtimeCodes: ReadonlySet<string> = new Set([
     SERVICE_AUDIT_CODES.gatewayRuntimeNode,
@@ -196,7 +197,7 @@ export async function canRepairRuntime(
       (finding) =>
         finding.kind === "unknown-edit" &&
         !(
-          process.platform === "linux" &&
+          platform === "linux" &&
           finding.sourcePath &&
           finding.sourcePath !== command.sourcePath &&
           command.definitionPaths?.includes(finding.sourcePath)
