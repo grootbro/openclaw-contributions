@@ -1,0 +1,56 @@
+name: Fallback routing proof
+on:
+  push:
+    branches: [proof/fallback-routing-provenance]
+permissions:
+  contents: read
+jobs:
+  reproduce:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      OPENCLAW_VITEST_RUNTIME: node
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-node-env
+        with:
+          node-version: 26.12.1
+          cache-mode: "off"
+      - name: Reproduce the real reply and provider path
+        run: node scripts/run-vitest.mjs src/auto-reply/reply/get-reply.fallback-transcript.test.ts --maxWorkers=1
+      - name: Verify the regression fails without provenance forwarding
+        run: |
+          cp src/auto-reply/reply/agent-runner-run-params.ts /tmp/fallback-run-params.ts
+          trap 'cp /tmp/fallback-run-params.ts src/auto-reply/reply/agent-runner-run-params.ts' EXIT
+          sed -i '/modelRoutingProvenance: params.modelRoutingProvenance,/d' src/auto-reply/reply/agent-runner-run-params.ts
+          set +e
+          node scripts/run-vitest.mjs src/auto-reply/reply/get-reply.fallback-transcript.test.ts --maxWorkers=1 > /tmp/fallback-negative.log 2>&1
+          result=$?
+          set -e
+          test "$result" -ne 0
+          rg 'Backup context' /tmp/fallback-negative.log > /dev/null
+          rg '2 failed' /tmp/fallback-negative.log
+          echo NEGATIVE_CONTROL_CONFIRMED
+      - name: Check affected consumers and prompt stability
+        if: always()
+        run: >-
+          node scripts/run-vitest.mjs
+          src/agents/embedded-agent-runner/run/attempt-prompt-submit.projections.test.ts
+          src/agents/agent-tools.prefix-stability.test.ts
+          src/auto-reply/reply/agent-runner-fallback-steering.test.ts
+          src/auto-reply/reply/agent-runner-cli-dispatch.test.ts
+          --maxWorkers=1
+      - name: Focused typecheck and lint
+        if: always()
+        run: |
+          mkdir -p .artifacts
+          cat > .artifacts/tsconfig.fallback-source.json <<'JSON'
+          {"extends":"../tsconfig.json","compilerOptions":{"noEmit":true,"noUnusedLocals":true,"noUnusedParameters":true,"rootDir":".."},"include":["../src/auto-reply/reply/agent-runner-run-params.ts","../src/auto-reply/reply/get-reply.fallback-transcript.test.ts","../src/**/*.d.ts","../ui/src/**/*.d.ts"],"exclude":[]}
+          JSON
+          node scripts/run-tsgo.mjs -p .artifacts/tsconfig.fallback-source.json
+          node scripts/run-oxlint.mjs --openclaw-focused-config --type-aware --tsconfig .artifacts/tsconfig.fallback-source.json --threads=1 src/auto-reply/reply/agent-runner-run-params.ts src/auto-reply/reply/get-reply.fallback-transcript.test.ts
+      - name: Check final file formatting
+        if: always()
+        run: node node_modules/oxfmt/bin/oxfmt --check src/auto-reply/reply/get-reply.fallback-transcript.test.ts src/auto-reply/reply/agent-runner-run-params.ts test/vitest/vitest.database-worker-core-paths.mjs
