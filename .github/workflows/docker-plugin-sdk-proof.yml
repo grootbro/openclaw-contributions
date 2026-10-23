@@ -20,9 +20,25 @@ jobs:
         with:
           node-version: "26.12.1"
           install-bun: "false"
-          cache-mode: off
+          cache-mode: "off"
+      - name: Format candidate files remotely
+        run: |
+          pnpm exec oxfmt --write scripts/lib/root-package-bundled-plugin-excludes.mjs test/scripts/bundled-plugin-build-entries.test.ts test/scripts/prune-docker-plugin-dist.test.ts scripts/e2e/onepassword-sdk-docker-proof.mjs
+          git diff > "$RUNNER_TEMP/remote-format.patch"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: remote-format
+          path: ${{ runner.temp }}/remote-format.patch
       - name: Run the desired collector and prune contracts
-        run: node scripts/run-vitest.mjs test/scripts/bundled-plugin-build-entries.test.ts test/scripts/prune-docker-plugin-dist.test.ts --maxWorkers=1
+        run: node scripts/run-vitest.mjs test/scripts/bundled-plugin-build-entries.test.ts test/scripts/prune-docker-plugin-dist.test.ts test/scripts/docker-plugin-selection.test.ts test/scripts/stage-bundled-plugin-runtime.test.ts test/scripts/desktop-runtime-plugins.test.ts test/scripts/bun-standalone-plugins.test.ts test/scripts/build-external-plugin-local-dist.test.ts --maxWorkers=1
+      - name: Lint changed tooling
+        run: node scripts/run-oxlint.mjs --tsconfig test/tsconfig/tsconfig.test.root.tooling.json scripts/lib/root-package-bundled-plugin-excludes.mjs test/scripts/bundled-plugin-build-entries.test.ts test/scripts/prune-docker-plugin-dist.test.ts scripts/e2e/onepassword-sdk-docker-proof.mjs
+      - name: Typecheck tooling consumers
+        run: node scripts/run-tsgo.mjs -p test/tsconfig/tsconfig.test.root.tooling.json --noEmit
+      - name: Check workflow and docs inventory
+        run: |
+          pnpm check:workflows
+          pnpm docs:list
 
   official-image:
     runs-on: ubuntu-24.04
