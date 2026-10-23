@@ -178,6 +178,8 @@ it.each(["all", "eligible"])(
   async (mode) => {
     const authored = ".artifacts/build-all-cache/authored.txt";
     const selected = ".artifacts/build-cache-inputs/selected.txt";
+    const staged = ".artifacts/build-all-cache/staged.txt";
+    const transferred = ".artifacts/build-cache-inputs/transferred.txt";
     const generated = [
       ".artifacts/build-all-cache/generated/output.js",
       ".artifacts/build-cache-inputs/generated/receipt.json",
@@ -187,16 +189,26 @@ it.each(["all", "eligible"])(
       [authored]: "original authored input\n",
     });
     const base = await initializeScriptGitWorkspace(fixture.workspace, ".");
+    await writeWorkspaceFiles(fixture.workspace, { [transferred]: "host input absent from worker index\n" });
     const initial = await fixture.runManifest([base, "eligible"]);
     expect(initial.code, initial.stderr).toBe(0);
+    const initialManifest = await fixture.readManifest(initial.stdout.trim());
+    expect(initialManifest.entries.map((entry) => entry.path)).toContain(transferred);
+    const removed = await runCommandWithTimeout(["git", "-C", fixture.workspace, "rm", "--cached", authored], { timeoutMs: 10_000 });
+    expect(removed.code, removed.stderr).toBe(0);
     await writeWorkspaceFiles(fixture.workspace, {
       [authored]: "authored edit\n",
       [selected]: "explicitly included input\n",
+      [staged]: "newly staged input\n",
       ".gitignore": `${selected}\n`,
       ".worktreeinclude": `${selected}\n`,
       ".artifacts/report.md": "useful report\n",
       ...Object.fromEntries(generated.map((name) => [name, "disposable build output\n"])),
     });
+    const admission = await runCommandWithTimeout(["git", "-C", fixture.workspace, "add", staged], {
+      timeoutMs: 10_000,
+    });
+    expect(admission.code, admission.stderr).toBe(0);
     if (process.platform !== "win32") {
       for (const name of generated) {
         await fs.chmod(path.join(fixture.workspace, name), 0);
@@ -206,7 +218,7 @@ it.each(["all", "eligible"])(
     expect(captured.code, captured.stderr).toBe(0);
     const manifest = await fixture.readManifest(captured.stdout.trim());
     expect(manifest.entries.map((entry) => entry.path)).toEqual(
-      expect.arrayContaining([authored, selected, ".artifacts/report.md", "source.txt"]),
+      expect.arrayContaining([authored, transferred, selected, staged, ".artifacts/report.md", "source.txt"]),
     );
     expect(manifest.entries.some((entry) => generated.includes(entry.path))).toBe(false);
     if (process.platform === "linux" && process.getuid?.() !== 0) {
@@ -222,3 +234,14 @@ it.each(["all", "eligible"])(
     }
   },
 );
+
+it("retains plain-workspace inputs when staging has created Git metadata", async () => {
+  const input = ".artifacts/build-all-cache/input.txt";
+  const fixture = await makeWorkspace({ [input]: "plain workspace input\n" });
+  await initializeScriptGitWorkspace(fixture.workspace, ".");
+  const captured = await fixture.runManifest(["", "all"]);
+  expect(captured.code, captured.stderr).toBe(0);
+  const manifest = await fixture.readManifest(captured.stdout.trim());
+  expect(manifest.baseCommit).toBeNull();
+  expect(manifest.entries.map((entry) => entry.path)).toContain(input);
+});

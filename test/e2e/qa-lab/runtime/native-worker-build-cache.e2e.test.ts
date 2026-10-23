@@ -145,6 +145,10 @@ it.skipIf(process.platform !== "linux")(
           providerBaseUrl: gatewayBaseUrl.replace(/\/v1$/u, ""),
           nativeWorkerDeviceId: identity.deviceId,
           fullAccess: true,
+          mutateConfig: (config) => ({
+            ...config,
+            agents: { ...config.agents, defaults: { ...config.agents?.defaults, memorySearch: { enabled: false } } },
+          }),
           command: {
             executablePath: process.execPath,
             argsPrefix: [path.resolve("dist/index.js")],
