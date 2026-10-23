@@ -9,6 +9,7 @@ import { isPostgresSqlConnection, type EngineConnection } from "../../infra/sql-
 import { SqliteJsonlReadBudgetExceededError } from "../../infra/sqlite-jsonl-budget-error.js";
 import { assertSqliteJsonlReadBudget } from "../../infra/sqlite-jsonl-budget.js";
 import { runSqliteReadSnapshotSync } from "../../infra/sqlite-transaction.js";
+import { selectActiveTranscriptIdentityRows } from "./session-accessor.sqlite-projection-read.js";
 import { getSessionKysely } from "./session-accessor.sqlite-scope.js";
 import type { TranscriptEntryAnchor, TranscriptTurnBoundary } from "./transcript-entry-anchor.js";
 import { transcriptEventJsonSql, transcriptEventNavigationSql } from "./transcript-payload.js";
@@ -198,13 +199,7 @@ export function readClosedTranscriptTurnInDatabase(
       const readAnchor = (anchor: TranscriptEntryAnchor) =>
         executeSqliteQueryTakeFirstSync(
           connection,
-          db
-            .selectFrom("transcript_event_identities as identity")
-            .innerJoin("session_transcript_active_events as active", (join) =>
-              join
-                .onRef("active.session_id", "=", "identity.session_id")
-                .onRef("active.event_seq", "=", "identity.seq"),
-            )
+          selectActiveTranscriptIdentityRows({ db: connection })
             .innerJoin("transcript_rewrite_watermarks as rewrite", (join) =>
               join.onRef("rewrite.session_id", "=", "identity.session_id"),
             )
