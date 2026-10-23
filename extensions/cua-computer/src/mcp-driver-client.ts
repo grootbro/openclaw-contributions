@@ -396,22 +396,17 @@ class McpCuaDriverSession implements CuaDriverSession {
     if (this.disposed) {
       throw driverUnavailable("cua-computer is stopping");
     }
-    if (!this.startPromise) {
-      const start = this.tool("start_session", {}, signal).then((result) => {
+    this.startPromise ??= this.tool("start_session", {}, signal)
+      .then((result) => {
         if (result.isError) {
           throw driverProtocolError(result.text || "CUA MCP start_session failed");
         }
         this.started = true;
-      });
-      this.startPromise = start;
-      try {
-        await start;
-      } catch (error) {
+      })
+      .catch((error: unknown) => {
         this.startPromise = undefined;
         throw error;
-      }
-      return;
-    }
+      });
     await this.startPromise;
   }
 }

@@ -116,21 +116,15 @@ class DirectCuaDriverSession {
     if (this.disposed) {
       throw new Error("COMPUTER_DRIVER_UNAVAILABLE: cua-computer is stopping");
     }
-    if (!this.startPromise) {
-      const start = this.session
-        .startSession({ session: this.publicSession }, asyncOptions(signal))
-        .then(() => {
-          this.started = true;
-        });
-      this.startPromise = start;
-      try {
-        await start;
-      } catch (error) {
+    this.startPromise ??= this.session
+      .startSession({ session: this.publicSession }, asyncOptions(signal))
+      .then(() => {
+        this.started = true;
+      })
+      .catch((error: unknown) => {
         this.startPromise = undefined;
         throw error;
-      }
-      return;
-    }
+      });
     await this.startPromise;
   }
 
