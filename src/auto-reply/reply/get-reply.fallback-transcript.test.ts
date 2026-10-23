@@ -170,7 +170,7 @@ it.each(["openai-responses", "openai-completions"] as const)(
         expect(backupInput).toContain("Backup context.");
         const storePath = path.join(state.agentDir(), "openclaw-agent.sqlite");
         const session = expectDefined(
-          await loadExactSessionEntry({ agentId: "main", storePath, sessionKey }),
+          loadExactSessionEntry({ agentId: "main", storePath, sessionKey }),
           "reply session",
         );
         const transcript = await readTranscriptMessages({
@@ -178,7 +178,9 @@ it.each(["openai-responses", "openai-completions"] as const)(
           sessionKey,
           sessionId: session.entry.sessionId,
         });
-        const users = transcript.filter((entry) => entry.role === "user" && entry.display !== false);
+        const users = transcript.filter(
+          (entry) => entry.role === "user" && entry.display !== false,
+        );
         expect(users).toHaveLength(1);
         expect(users[0]).toMatchObject({ content: message, idempotencyKey: expect.any(String) });
         const projection = readModelPromptProjection(users[0]);
