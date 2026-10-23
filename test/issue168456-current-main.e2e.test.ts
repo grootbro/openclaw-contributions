@@ -170,9 +170,11 @@ it.each<Scenario>(["cron-timeout", "dashboard-long-window", "dashboard-retries"]
       }));
       if (lossless) {
         const saved = JSON.parse(await readFile(instance.configPath, "utf8"));
+        // Lossless emits bootstrap/after-turn lifecycle receipts at debug level.
+        saved.logging = { ...saved.logging, level: "debug", file: instance.state.path("gateway-proof.log") };
         saved.plugins.entries["lossless-claw"].config = {
           databasePath: instance.state.path("lossless-proof.sqlite"),
-          independentLogFile: { enabled: false },
+          independentLogFile: { enabled: true, file: instance.state.path("lossless-proof.log") },
         };
         await instance.state.writeConfig(saved);
       }
@@ -251,7 +253,14 @@ it.each<Scenario>(["cron-timeout", "dashboard-long-window", "dashboard-retries"]
       expect(instance.logs().includes(KEYED_ERROR)).toBe(false);
       if (lossless) {
         expect(instance.logs()).not.toMatch(/\[context-engine\].*(?:degraded|falling back|downgrad|quarantin)/i);
-        expect(instance.logs()).toContain("[lcm] assemble: done");
+        // Runtime child loggers write to the host file sink, not Gateway stdout.
+        // Read the plugin's supported per-instance sink to prove its lifecycle ran.
+        const engineLog = await readFile(instance.state.path("lossless-proof.log"), "utf8");
+        expect(engineLog).toContain("[lcm] bootstrap: done");
+        expect(engineLog).toContain("[lcm] afterTurn: done");
+        if (dashboard) {
+          expect(engineLog).toContain("[lcm] assemble: done");
+        }
         expect(instance.logs()).not.toMatch(/lossless-claw[^\n]*(?:failed|error|not found)/i);
       }
       console.log("ISSUE168456_PROOF", JSON.stringify({
