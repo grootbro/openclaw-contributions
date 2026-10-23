@@ -1,0 +1,57 @@
+name: Docker plugin SDK alias proof
+
+on:
+  push:
+    branches: [fix/docker-plugin-sdk-alias]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  focused-owner:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-node-env
+        with:
+          node-version: "26.12.1"
+          install-bun: "false"
+          cache-mode: off
+      - name: Run the desired collector and prune contracts
+        run: node scripts/run-vitest.mjs test/scripts/bundled-plugin-build-entries.test.ts test/scripts/prune-docker-plugin-dist.test.ts --maxWorkers=1
+
+  official-image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      DOCKER_BUILDKIT: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Build the official Dockerfile with onepassword selected
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build --file Dockerfile --tag openclaw-onepassword-sdk-proof:current \
+            --build-arg OPENCLAW_EXTENSIONS=onepassword \
+            --build-arg OPENCLAW_DOCKER_BUILD_NODE_OPTIONS=--max-old-space-size=6144 \
+            --progress=plain . > "$RUNNER_TEMP/openclaw-docker-build.log" 2>&1 || {
+              tail -n 180 "$RUNNER_TEMP/openclaw-docker-build.log"
+              exit 1
+            }
+          docker image inspect openclaw-onepassword-sdk-proof:current \
+            --format 'image={{.Id}} user={{.Config.User}} size={{.Size}}'
+      - name: Exercise shipped static resolver with synthetic op and no network
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges \
+            --pids-limit 128 --memory 1g --cpus 2 \
+            --mount type=bind,source="$GITHUB_WORKSPACE/scripts/e2e/onepassword-sdk-docker-proof.mjs",target=/proof/onepassword-sdk-docker-proof.mjs,readonly \
+            --entrypoint node openclaw-onepassword-sdk-proof:current \
+            /proof/onepassword-sdk-docker-proof.mjs
