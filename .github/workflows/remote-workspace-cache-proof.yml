@@ -1,0 +1,31 @@
+name: Remote workspace build-cache proof
+on:
+  push:
+    branches: [fix/remote-workspace-build-caches]
+permissions:
+  contents: read
+jobs:
+  gateway-native-worker:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      OPENCLAW_VITEST_RUNTIME: node
+      OPENCLAW_E2E_VERBOSE: "1"
+      OPENCLAW_RUN_NODE_SKIP_DTS_BUILD: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-node-env
+        with:
+          node-version: 26.12.1
+          install-bun: "false"
+          cache-mode: "off"
+      - name: Build the production Gateway and private QA runtime
+        env:
+          OPENCLAW_BUILD_PRIVATE_QA: "1"
+        run: pnpm build qaRuntime
+      - name: Prove build-cache handling through a real Gateway and native worker
+        env:
+          OPENCLAW_E2E_USE_PREBUILT_DIST: "1"
+        run: node scripts/run-vitest.mjs test/e2e/qa-lab/runtime/native-worker-build-cache.e2e.test.ts --maxWorkers=1
