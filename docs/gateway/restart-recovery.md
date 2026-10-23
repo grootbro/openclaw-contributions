@@ -22,6 +22,9 @@ tomorrow, without a new user message. Shutdown uses the same interruption and
 recovery marking as a managed restart, with the existing drain deadlines.
 Explicit session Stop/cancel remains terminal. The crash-loop breaker, recovery
 retry budgets, current-authority checks, and archived/reset exclusions still apply.
+Before accepting another message, the Gateway retires leftover recovery records
+whose runs are all recorded terminal and have no remaining execution or delivery
+owner. This lets a stopped conversation continue without resetting its history.
 Cron owns recovery of interrupted scheduled turns. An enabled, unchanged,
 time-scheduled agent job interrupted before delivery gets one fresh retry after
 startup, including one-shot jobs. Its original run remains recorded as interrupted.
@@ -1303,6 +1306,13 @@ Subagent runs are persisted in the shared SQLite state database, so the
 subagent registry survives the process. On boot, children with a recorded Gateway
 restart interruption resume as soon as startup restores requester ownership,
 without waiting for the periodic registry sweep. The sweep remains a retry backstop.
+This includes accepted launches whose child session had not yet recorded its first
+lifecycle run when the Gateway stopped. Startup marks that unfinished work as
+interrupted under the same session-ownership checks. If it cannot resume through
+the existing interruption path, it promptly settles as interrupted and notifies
+the requester through normal completion delivery, without waiting for the lost-run
+sweep or its cleanup backoff. A different recorded child lifecycle run is never
+claimed as an unstarted launch.
 The crash-loop breaker pauses this settlement too; the same sweep retries when
 the breaker's recovery window ends.
 Startup restores completed runs directly from the registry. Any retained delivery

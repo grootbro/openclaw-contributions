@@ -679,6 +679,7 @@ export const databaseWorkerCoreTestFiles = [
   "src/gateway/session-reset-acp.controller.test.ts",
   "src/auto-reply/reply/abort.test.ts",
   "src/auto-reply/reply/dispatch-from-config.pending-restart.test.ts",
+  "src/auto-reply/reply/dispatch-from-config.transcript-reset.integration.test.ts",
   "src/auto-reply/reply/session.acp-reset-routing.test.ts",
   "src/auto-reply/reply/session-fork.test.ts",
   "src/auto-reply/reply/dispatch-acp.test.ts",
@@ -1375,6 +1376,7 @@ export const databaseWorkerCoreTestFiles = [
   "src/infra/database-engine/plugin-lifecycle-lease.postgres.test.ts",
   "src/infra/database-engine/session-path-alias.conformance.test.ts",
   "src/infra/database-engine/session-archive-alias.conformance.test.ts",
+  "src/infra/database-engine/outcome-surfaces.postgres.test.ts",
 ];
 
 const databaseWorkerCoreTestFileSet = new Set(databaseWorkerCoreTestFiles);
