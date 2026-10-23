@@ -149,6 +149,7 @@ it.each<Scenario>(["cron-timeout", "dashboard-long-window", "dashboard-retries"]
       config.agents!.defaults!.models!["proof-primary/primary"] = {
         agentRuntime: { id: "openclaw" }, params: { transport: "sse", openaiWsWarmup: false },
       };
+      let engineAssembly: { completed: number; liveFallback: number; empty: number } | undefined;
       if (lossless) {
         config.plugins = {
           allow: ["lossless-claw"], load: { paths: [lossless] },
@@ -170,7 +171,7 @@ it.each<Scenario>(["cron-timeout", "dashboard-long-window", "dashboard-retries"]
       }));
       if (lossless) {
         const saved = JSON.parse(await readFile(instance.configPath, "utf8"));
-        // Lossless emits bootstrap/after-turn lifecycle receipts at debug level.
+        // Lossless emits bootstrap/commit-turn lifecycle receipts at debug level.
         saved.logging = { ...saved.logging, level: "debug", file: instance.state.path("gateway-proof.log") };
         saved.plugins.entries["lossless-claw"].config = {
           databasePath: instance.state.path("lossless-proof.sqlite"),
@@ -257,17 +258,22 @@ it.each<Scenario>(["cron-timeout", "dashboard-long-window", "dashboard-retries"]
         // Read the plugin's supported per-instance sink to prove its lifecycle ran.
         const engineLog = await readFile(instance.state.path("lossless-proof.log"), "utf8");
         expect(engineLog).toContain("[lcm] bootstrap: done");
-        expect(engineLog).toContain("[lcm] afterTurn: done");
-        if (dashboard) {
-          expect(engineLog).toContain("[lcm] assemble: done");
-        }
+        // Current hosts use commitTurn; short, unsummarized histories may take
+        // Lossless's own live-context path rather than produce an assembled prefix.
+        expect(engineLog).toContain("[lcm] commitTurn: session queue acquired");
+        expect(engineLog).toContain("[lcm] assemble:");
+        engineAssembly = {
+          completed: count(engineLog, "[lcm] assemble: done"),
+          liveFallback: count(engineLog, "[lcm] assemble: falling back to live context"),
+          empty: count(engineLog, "[lcm] assemble: no context items"),
+        };
         expect(instance.logs()).not.toMatch(/lossless-claw[^\n]*(?:failed|error|not found)/i);
       }
       console.log("ISSUE168456_PROOF", JSON.stringify({
         scenario, engine: lossless ? "lossless-claw" : "default", primaryCount,
         backupCount: 1, visibleUserCount: visible.length, admittedActiveUsers: activeUsers.length,
         queuedMarkerCounts: activeRequests.map((request) => request.markerCount),
-        keyedAssertion: false, wallMs: Date.now() - startedAt,
+        keyedAssertion: false, engineAssembly, wallMs: Date.now() - startedAt,
       }));
     } catch (error) {
       console.error("ISSUE168456_DIAGNOSTIC", instance ? diagnostic(instance, requests) : JSON.stringify({ requests }));
