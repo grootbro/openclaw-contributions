@@ -16,6 +16,7 @@ import type {
 import { iterateUnindexedActiveTranscriptNavigation } from "./session-accessor.sqlite-history-navigation.js";
 import {
   getActiveTranscriptKysely,
+  selectActiveTranscriptEventRows,
   selectActiveTranscriptIdentityRows,
   type CurrentTranscriptProjection,
 } from "./session-accessor.sqlite-projection-read.js";
@@ -364,13 +365,7 @@ export function readSessionTranscriptBoundedActiveContextCore(
           .slice(0, limits ? limits.maxEvents + 1 : undefined)
       : iterateSqliteQuerySync(
           projection.database.db,
-          db
-            .selectFrom("session_transcript_active_events as active")
-            .innerJoin("transcript_events as event", (join) =>
-              join
-                .onRef("event.session_id", "=", "active.session_id")
-                .onRef("event.seq", "=", "active.event_seq"),
-            )
+          selectActiveTranscriptEventRows(projection.database)
             .select([
               "active.event_seq",
               "active.active_position",

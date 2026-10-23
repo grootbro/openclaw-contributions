@@ -9,7 +9,10 @@ import { isPostgresSqlConnection, type EngineConnection } from "../../infra/sql-
 import { SqliteJsonlReadBudgetExceededError } from "../../infra/sqlite-jsonl-budget-error.js";
 import { assertSqliteJsonlReadBudget } from "../../infra/sqlite-jsonl-budget.js";
 import { runSqliteReadSnapshotSync } from "../../infra/sqlite-transaction.js";
-import { selectActiveTranscriptIdentityRows } from "./session-accessor.sqlite-projection-read.js";
+import {
+  selectActiveTranscriptEventRows,
+  selectActiveTranscriptIdentityRows,
+} from "./session-accessor.sqlite-projection-read.js";
 import { getSessionKysely } from "./session-accessor.sqlite-scope.js";
 import type { TranscriptEntryAnchor, TranscriptTurnBoundary } from "./transcript-entry-anchor.js";
 import { transcriptEventJsonSql, transcriptEventNavigationSql } from "./transcript-payload.js";
@@ -245,13 +248,7 @@ export function readClosedTranscriptTurnInDatabase(
       if (ancestry !== "descendant") {
         return { kind: ancestry } as const;
       }
-      const selected = db
-        .selectFrom("session_transcript_active_events as active")
-        .innerJoin("transcript_events as event", (join) =>
-          join
-            .onRef("event.session_id", "=", "active.session_id")
-            .onRef("event.seq", "=", "active.event_seq"),
-        )
+      const selected = selectActiveTranscriptEventRows({ db: connection })
         .where("active.session_id", "=", target.sessionId)
         .where("active.message_position", "is not", null)
         .where("active.message_position", ">=", params.boundary.admission.activeMessagePosition)

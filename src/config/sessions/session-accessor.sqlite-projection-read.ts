@@ -141,6 +141,16 @@ export function selectActiveTranscriptIdentityRows(database: Pick<TranscriptRead
     );
 }
 
+export function selectActiveTranscriptEventRows(database: Pick<TranscriptReadDatabase, "db">) {
+  return getActiveTranscriptKysely(database)
+    .selectFrom("session_transcript_active_events as active")
+    .innerJoin("transcript_events as event", (join) =>
+      join
+        .onRef("event.session_id", "=", "active.session_id")
+        .onRef("event.seq", "=", "active.event_seq"),
+    );
+}
+
 /** Materialize only physical events already selected in the caller's admitted snapshot. */
 export function readSnapshotEventRows(
   projection: CurrentTranscriptProjection,
@@ -194,13 +204,7 @@ export function selectMessageRows(
     | { positions: number[] }
     | { start: number | RawBuilder<number>; endExclusive: number | RawBuilder<number> },
 ) {
-  const query = getActiveTranscriptKysely(database)
-    .selectFrom("session_transcript_active_events as active")
-    .innerJoin("transcript_events as event", (join) =>
-      join
-        .onRef("event.session_id", "=", "active.session_id")
-        .onRef("event.seq", "=", "active.event_seq"),
-    )
+  const query = selectActiveTranscriptEventRows(database)
     .where("active.session_id", "=", sessionId)
     .where("active.message_position", "is not", null)
     .orderBy("active.message_position", "asc");
