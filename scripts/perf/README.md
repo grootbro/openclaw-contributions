@@ -692,6 +692,45 @@ reference time. Generate a fresh fixture for each startup comparison. Cron jobs,
 heartbeats, channels, plugins, browser automation and network discovery are
 disabled so this workload does not call models or external integrations.
 
+## Measure idle Gateway allocation and timer work
+
+`idle-gateway-measure.ts` connects one real Control UI client to an owned Gateway,
+then sends no application requests during the measured window. Use a freshly
+generated, offline team-shape fixture for each side; omitting `--state-dir`
+retains the small empty-state workload. `--output` must name a new artifact
+directory. The fixture config is preserved and an isolated measurement config
+is written under the output directory.
+
+```sh
+node --import ./scripts/tsx.mjs scripts/perf/idle-gateway-measure.ts \
+  --state-dir /srv/perf-sandbox/<lane>/fixture-a \
+  --output /srv/perf-sandbox/<lane>/idle-a \
+  --entry src/entry.ts --port 41563 --minutes 3 --settle-seconds 60 \
+  --start-at <future-epoch-ms> --allocations
+```
+
+Run on the authorized benchmark host under its measurement lock, resource limits
+and production guard. Concurrent baseline/candidate runs need separate fixtures,
+output directories and loopback ports (40000 or higher), the same `--start-at`,
+and the host's interleaved CPU sets, swapped for the second pair. The start barrier
+follows readiness and settling; a missed barrier fails the run. Actual capture
+timestamps are recorded so placement and start skew remain visible.
+
+`result.json` records main-isolate CPU, GC durations and counts, event-loop p99 and
+sample count, and V8 promoted bytes for the capture only. `--allocations` uses the
+shared private IPC profiler to include objects collected by minor and major GC;
+the saved heap profile and summary include the top allocation sites and estimated
+bytes per minute and second. Worker allocations are excluded. `--profile` captures
+a main-isolate CPU profile over the measured window. Neither profiling mode
+exposes an inspector listener or copies operator credentials.
+
+Use `--timers` in a separate attribution run to collect per-timer callback counts,
+CPU and worker snapshots. It instruments timer creation and adds periodic IPC
+samples, so leave it off for allocation/GC acceptance comparisons. Compare paired
+per-minute allocation, promotion and total GC time; retain counts and maximum
+pause alongside any tail percentile, applying the campaign's sample-count and
+absolute-delta rules rather than treating sparse tails as gates.
+
 ## Measure clean-close seals across app versions
 
 `seal-version-restart.ts` measures the real cold-process agent database open,
