@@ -240,9 +240,10 @@ try {
       includeWorkers: false,
     });
   }
-  const stopDiagnostics = values.allocations
-    ? undefined
-    : await startGatewayDiagnostics(child, diagnosticsId);
+  const stopDiagnostics =
+    values.allocations || values.profile
+      ? undefined
+      : await startGatewayDiagnostics(child, diagnosticsId);
   const cpuBefore = await readGatewayCpuUsage(child);
   const start = Date.now();
   console.log(JSON.stringify({ ready: true, pid: child.pid, start, minutes, output }));
@@ -263,18 +264,23 @@ try {
   const heap = values.allocations
     ? readGatewayHeapProfile(heapProfilePath, { includeCollectedObjects: true })
     : undefined;
-  const diagnostics = stopDiagnostics ? await stopDiagnostics() : heap?.diagnostics;
-  if (!diagnostics || diagnostics.collectionErrors > 0) {
-    throw new Error("Idle measurement has incomplete diagnostic accounting");
-  }
   if (values.profile) {
     await controlGatewayProfile(child, "cpu", "stop", cpuProfilePath);
   }
-  const promotion = readGatewayGcTrace(
-    logPath,
-    values.allocations ? heapProfilePath : diagnosticsId,
-    values.allocations ? "heap" : "diagnostics",
-  );
+  const profile = values.profile ? readGatewayCpuProfile(cpuProfilePath) : undefined;
+  const diagnostics = stopDiagnostics
+    ? await stopDiagnostics()
+    : (heap?.diagnostics ?? profile?.diagnostics);
+  if (!diagnostics || diagnostics.collectionErrors > 0) {
+    throw new Error("Idle measurement has incomplete diagnostic accounting");
+  }
+  const promotion = values.profile
+    ? undefined
+    : readGatewayGcTrace(
+        logPath,
+        values.allocations ? heapProfilePath : diagnosticsId,
+        values.allocations ? "heap" : "diagnostics",
+      );
   writeFileSync(
     path.join(output, "result.json"),
     JSON.stringify(
@@ -294,7 +300,7 @@ try {
         cpu: { ...measureGatewayCpuUsage(cpuBefore, cpuAfter), before: cpuBefore, after: cpuAfter },
         diagnostics,
         promotion,
-        profile: values.profile ? readGatewayCpuProfile(cpuProfilePath) : undefined,
+        profile,
         allocations: heap
           ? {
               ...heap,

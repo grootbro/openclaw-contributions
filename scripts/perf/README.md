@@ -721,8 +721,10 @@ sample count, and V8 promoted bytes for the capture only. `--allocations` uses t
 shared private IPC profiler to include objects collected by minor and major GC;
 the saved heap profile and summary include the top allocation sites and estimated
 bytes per minute and second. Worker allocations are excluded. `--profile` captures
-a main-isolate CPU profile over the measured window. Neither profiling mode
-exposes an inspector listener or copies operator credentials.
+a main-isolate CPU profile and its diagnostics over the measured window; promotion
+accounting requires a run without `--profile`. Run CPU and allocation profiling
+separately. Neither profiling mode exposes an inspector listener or copies operator
+credentials.
 
 Use `--timers` in a separate attribution run to collect per-timer callback counts,
 CPU and worker snapshots. It instruments timer creation and adds periodic IPC
