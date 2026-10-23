@@ -1,0 +1,68 @@
+name: Qwen Gateway transport proof
+on:
+  push:
+    branches: [proof/qwen-custom-provider-thinking]
+permissions:
+  contents: read
+jobs:
+  gateway-proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        revision: [patched, base]
+    env:
+      OPENCLAW_VITEST_RUNTIME: node
+      OPENCLAW_E2E_VERBOSE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: ./.github/actions/setup-node-env
+        with:
+          node-version: 26.12.1
+          cache-mode: "off"
+      - name: Pin the negative-control source
+        if: matrix.revision == 'base'
+        run: |
+          git fetch --depth=1 origin 0d1d2615a60ded33286140e601820df9bdde1180
+          git show FETCH_HEAD:extensions/qwen/stream.ts > extensions/qwen/stream.ts
+      - name: Format the proof fixture
+        run: node node_modules/oxfmt/bin/oxfmt test/qwen-custom-gateway-proof.e2e.test.ts
+      - name: Run the real Gateway and HTTPS provider transport
+        shell: bash
+        run: |
+          mkdir -p .artifacts/qwen-proof
+          set +e
+          node scripts/run-vitest.mjs test/qwen-custom-gateway-proof.e2e.test.ts --maxWorkers=1 2>&1 | tee .artifacts/qwen-proof/gateway.log
+          proof_result=${PIPESTATUS[0]}
+          set -e
+          if [ '${{ matrix.revision }}' = patched ]; then
+            test "$proof_result" -eq 0
+          else
+            test "$proof_result" -ne 0
+            python3 - <<'PY'
+          import json
+          from pathlib import Path
+          rows=[]
+          for line in Path('.artifacts/qwen-proof/gateway.log').read_text().splitlines():
+            if 'QWEN_GATEWAY_PROOF ' in line:
+              payload=line.split('QWEN_GATEWAY_PROOF ',1)[1]
+              try: rows.append(json.JSONDecoder().raw_decode(payload)[0])
+              except (ValueError,TypeError): pass
+          standard=[r for r in rows if r.get('route')=='standard' and r.get('thinkingLevel')=='medium']
+          token=[r for r in rows if r.get('route')=='token-plan' and r.get('thinkingLevel')=='medium']
+          assert standard and token, 'Missing completed real Gateway observations; this is not a valid negative control'
+          assert any(r.get('enable_thinking') is not True for r in standard) or any(r.get('reasoning_effort')!='high' for r in token), 'Base did not show the targeted wire regression'
+          print('NEGATIVE_CONTROL_CONFIRMED: real Gateway wire policy differs on unpatched source')
+          PY
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qwen-gateway-${{ matrix.revision }}
+          path: |
+            .artifacts/qwen-proof/gateway.log
+            test/qwen-custom-gateway-proof.e2e.test.ts
