@@ -8,12 +8,13 @@ import { json } from "node:stream/consumers";
 import { expect, it } from "vitest";
 import { providerResponse } from "../src/agents/embedded-agent-runner.wire.test-support.js";
 import { loadExactSessionEntry } from "../src/config/sessions/session-accessor.js";
-import { connectGatewayClient, disconnectGatewayClient } from "../src/gateway/test-helpers.e2e.js";
+import { disconnectGatewayClient } from "../src/gateway/test-helpers.e2e.js";
 import { readTranscriptMessages } from "../src/sessions/user-turn-transcript.test-support.js";
 import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../src/utils/message-channel.js";
 import {
   createOpenAiResponsesModelConfig,
 } from "./helpers/openai-responses-model-fixture.js";
+import { connectRestartClient } from "./gateway-restart.test-support.js";
 import { closeHttpServer, listenLoopback } from "./helpers/gateway-integration-fixtures.js";
 import {
   createOpenClawTestInstance,
@@ -123,7 +124,7 @@ it.each<Scenario>(["cron-timeout", "dashboard-long-window", "dashboard-retries"]
     });
     const baseUrl = await listenLoopback(server, "http");
     let instance: OpenClawTestInstance | undefined;
-    let client: Awaited<ReturnType<typeof connectGatewayClient>> | undefined;
+    let client: Awaited<ReturnType<typeof connectRestartClient>> | undefined;
     try {
       const config = createOpenAiResponsesModelConfig({
         baseUrl,
@@ -176,12 +177,14 @@ it.each<Scenario>(["cron-timeout", "dashboard-long-window", "dashboard-retries"]
         await instance.state.writeConfig(saved);
       }
       await instance.startGateway();
-      client = await connectGatewayClient({
-        url: instance.url, token: instance.gatewayToken,
+      const { buildId } = JSON.parse(await readFile("dist/build-info.json", "utf8"));
+      expect(typeof buildId).toBe("string");
+      client = await connectRestartClient(instance, {
         role: "operator", scopes: ["operator.admin", "operator.read", "operator.write"],
         ...(dashboard ? {
           origin: `http://127.0.0.1:${instance.port}`,
           clientName: GATEWAY_CLIENT_NAMES.CONTROL_UI,
+          clientBuildId: buildId,
           mode: GATEWAY_CLIENT_MODES.WEBCHAT,
         } : {}),
       });
@@ -204,7 +207,7 @@ it.each<Scenario>(["cron-timeout", "dashboard-long-window", "dashboard-retries"]
         expect(history.messages.some((message) => message.role === "assistant" && text(message.content).includes(answer))).toBe(true);
       } else {
         const job = await client.request<{ id: string }>("cron.add", {
-          name: "issue168456 timeout reproduction", agentId: "main", enabled: true,
+          name: "issue168456 timeout reproduction", agentId: "main", enabled: true, deleteAfterRun: false,
           schedule: { kind: "at", at: new Date(Date.now() + 3_600_000).toISOString() },
           sessionTarget: "isolated", wakeMode: "now", delivery: { mode: "none" },
           payload: { kind: "agentTurn", message: active, timeoutSeconds: 120, toolsAllow: [] },
@@ -227,7 +230,7 @@ it.each<Scenario>(["cron-timeout", "dashboard-long-window", "dashboard-retries"]
       await instance.stopGateway();
       const storePath = path.join(instance.state.agentDir(), "openclaw-agent.sqlite");
       const session = loadExactSessionEntry({ agentId: "main", sessionKey, storePath });
-      expect(session?.entry.sessionId).toBeTruthy();
+      expect(session?.entry.sessionId, diagnostic(instance, requests)).toBeTruthy();
       const messages = await readTranscriptMessages({ sessionKey, sessionId: session!.entry.sessionId, storePath });
       const visible = messages.filter((message) => message.role === "user" && message.display !== false);
       const activeUsers = visible.filter((message) => text(message.content).includes(active));

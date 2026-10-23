@@ -10,6 +10,7 @@ jobs:
     timeout-minutes: 30
     env:
       OPENCLAW_VITEST_RUNTIME: node
+      OPENCLAW_E2E_VERBOSE: "1"
       OPENCLAW_RUN_NODE_SKIP_DTS_BUILD: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
