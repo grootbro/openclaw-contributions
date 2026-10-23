@@ -26,11 +26,11 @@ jobs:
         env:
           OPENCLAW_BUILD_PRIVATE_QA: "1"
         run: pnpm build qaRuntime
-      - name: Gateway reproduction with default context engine
+      - name: Gateway cron proof with default context engine
         if: ${{ always() && steps.runtime.outcome == 'success' }}
         env:
           OPENCLAW_E2E_USE_PREBUILT_DIST: "1"
-        run: node scripts/run-vitest.mjs test/issue168456-current-main.e2e.test.ts --maxWorkers=1
+        run: node scripts/run-vitest.mjs test/issue168456-current-main.e2e.test.ts --maxWorkers=1 -t cron-timeout
       - name: Prepare pinned Lossless Claw package without scripts
         id: lossless
         if: always()
@@ -50,7 +50,14 @@ jobs:
           print('Lossless package 1.1.1 verified:',actual)
           with tarfile.open(tarball) as archive:
               archive.extractall(root, filter='data')
+          manifest=json.loads((root/'package/package.json').read_text())
+          deps=root/'deps'
+          deps.mkdir()
+          (deps/'package.json').write_text(json.dumps({'private':True, 'dependencies':manifest.get('dependencies',{})}))
           PYINTEGRITY
+          npm install --prefix "$RUNNER_TEMP/issue168456-lossless/deps" --omit=dev --ignore-scripts --no-audit --no-fund
+          mkdir -p "$RUNNER_TEMP/issue168456-lossless/package/node_modules"
+          cp -a "$RUNNER_TEMP/issue168456-lossless/deps/node_modules/." "$RUNNER_TEMP/issue168456-lossless/package/node_modules/"
           echo "ISSUE168456_LOSSLESS_PLUGIN=$RUNNER_TEMP/issue168456-lossless/package" >> "$GITHUB_ENV"
       - name: Gateway reproduction with actual Lossless Claw
         if: ${{ always() && steps.runtime.outcome == 'success' && steps.lossless.outcome == 'success' }}

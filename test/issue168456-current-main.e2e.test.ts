@@ -198,6 +198,7 @@ it.each<Scenario>(["cron-timeout", "dashboard-long-window", "dashboard-retries"]
         expect(terminal.status, diagnostic(instance!, requests)).toBe("ok");
       };
       let sessionKey = "agent:main:dashboard:issue168456";
+      let cronSessionId: string | undefined;
       if (dashboard) {
         await send(sessionKey, warmup);
         await send(sessionKey, active);
@@ -224,14 +225,19 @@ it.each<Scenario>(["cron-timeout", "dashboard-long-window", "dashboard-retries"]
         expect(terminal, diagnostic(instance, requests)).toMatchObject({ status: "ok", summary: expect.stringContaining(answer) });
         expect(terminal?.sessionKey).toBeTruthy();
         sessionKey = terminal!.sessionKey!;
+        cronSessionId = terminal!.sessionId;
+        expect(cronSessionId, diagnostic(instance, requests)).toEqual(expect.any(String));
       }
       await disconnectGatewayClient(client);
       client = undefined;
       await instance.stopGateway();
       const storePath = path.join(instance.state.agentDir(), "openclaw-agent.sqlite");
-      const session = loadExactSessionEntry({ agentId: "main", sessionKey, storePath });
-      expect(session?.entry.sessionId, diagnostic(instance, requests)).toBeTruthy();
-      const messages = await readTranscriptMessages({ sessionKey, sessionId: session!.entry.sessionId, storePath });
+      // Cron history owns the completed private run identity; its visible entry may be retired.
+      const sessionId = dashboard
+        ? loadExactSessionEntry({ agentId: "main", sessionKey, storePath })?.entry.sessionId
+        : cronSessionId;
+      expect(sessionId, diagnostic(instance, requests)).toEqual(expect.any(String));
+      const messages = await readTranscriptMessages({ sessionKey, sessionId: sessionId!, storePath });
       const visible = messages.filter((message) => message.role === "user" && message.display !== false);
       const activeUsers = visible.filter((message) => text(message.content).includes(active));
       expect(activeUsers).toHaveLength(1);
