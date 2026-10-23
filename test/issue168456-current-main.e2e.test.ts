@@ -1,19 +1,20 @@
 // Proof-only: real Gateway, cron/chat admission, HTTP transport, and durable transcript.
 // Synthetic model responses establish runtime behavior, not commercial-provider acceptance.
+import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { json } from "node:stream/consumers";
 import { expect, it } from "vitest";
+import { providerResponse } from "../src/agents/embedded-agent-runner.wire.test-support.js";
 import { loadExactSessionEntry } from "../src/config/sessions/session-accessor.js";
 import { connectGatewayClient, disconnectGatewayClient } from "../src/gateway/test-helpers.e2e.js";
 import { readTranscriptMessages } from "../src/sessions/user-turn-transcript.test-support.js";
 import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../src/utils/message-channel.js";
 import {
   createOpenAiResponsesModelConfig,
-  startOpenAiResponsesModelServer,
 } from "./helpers/openai-responses-model-fixture.js";
-import { writeOpenAiResponsesText } from "./helpers/openai-responses-sse.js";
+import { closeHttpServer, listenLoopback } from "./helpers/gateway-integration-fixtures.js";
 import {
   createOpenClawTestInstance,
   type OpenClawTestInstance,
@@ -74,12 +75,16 @@ it.each<Scenario>(["cron-timeout", "dashboard-long-window", "dashboard-retries"]
     const answer = `ISSUE168456_OK_${scenario}`;
     const warmup = "ISSUE168456_EXISTING_CONVERSATION";
     const requests: Observation[] = [];
-    const server = await startOpenAiResponsesModelServer({
-      modelId: "primary",
-      bindError: "issue168456 synthetic HTTP fixture did not bind",
-      onRequest: async (request, response) => {
-        const body = await json(request) as { model: string; input?: unknown };
-        const input = JSON.stringify(body.input ?? []);
+    const server = createServer((request, response) => {
+      void (async () => {
+        if (request.method !== "POST") {
+          response.writeHead(404).end();
+          return;
+        }
+        const body = await json(request) as { model: string; input?: unknown; messages?: unknown };
+        const expectedPath = body.model === "primary" ? "/v1/chat/completions" : "/v1/responses";
+        expect(new URL(request.url ?? "/", "http://localhost").pathname).toBe(expectedPath);
+        const input = JSON.stringify(body.input ?? body.messages ?? []);
         requests.push({
           model: body.model,
           markerCount: count(input, QUEUED),
@@ -101,18 +106,27 @@ it.each<Scenario>(["cron-timeout", "dashboard-long-window", "dashboard-retries"]
           } }));
           return;
         }
-        writeOpenAiResponsesText(response, {
+        const fixture = providerResponse({
+          api: body.model === "primary" ? "openai-completions" : "openai-responses",
+          model: body.model,
           text: activeTurn ? answer : "ISSUE168456_WARMUP_OK",
           messageId: `msgproof${requests.length}`,
-          responseId: `respproof${requests.length}`,
-        });
-      },
+          id: `respproof${requests.length}`,
+          calls: [],
+        }).response;
+        response.writeHead(fixture.status, Object.fromEntries(fixture.headers));
+        response.end(await fixture.text());
+      })().catch((error: unknown) => {
+        response.writeHead(500, { "content-type": "application/json" });
+        response.end(JSON.stringify({ error: { message: String(error) } }));
+      });
     });
+    const baseUrl = await listenLoopback(server, "http");
     let instance: OpenClawTestInstance | undefined;
     let client: Awaited<ReturnType<typeof connectGatewayClient>> | undefined;
     try {
       const config = createOpenAiResponsesModelConfig({
-        baseUrl: server.baseUrl,
+        baseUrl,
         providerId: "proof-primary",
         modelId: "primary",
         reasoning: false,
@@ -121,6 +135,8 @@ it.each<Scenario>(["cron-timeout", "dashboard-long-window", "dashboard-retries"]
       const primary = config.models!.providers!["proof-primary"]!;
       const backup = { ...primary, models: primary.models.map((model) => ({ ...model, id: "backup", name: "backup" })) };
       config.models!.providers!["proof-backup"] = backup;
+      primary.api = "openai-completions";
+      primary.models = primary.models.map((model) => ({ ...model, api: "openai-completions" }));
       primary.timeoutSeconds = dashboard ? 180 : 2;
       config.models!.catalogRefresh = { enabled: false };
       config.agents!.defaults!.model = {
@@ -243,7 +259,7 @@ it.each<Scenario>(["cron-timeout", "dashboard-long-window", "dashboard-retries"]
         await disconnectGatewayClient(client);
       }
       await instance?.cleanup();
-      await server.close();
+      await closeHttpServer(server);
     }
   },
 );
