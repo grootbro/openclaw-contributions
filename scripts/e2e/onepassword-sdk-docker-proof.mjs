@@ -16,8 +16,16 @@ const rejectedValue = "synthetic-rejected-secret";
 assert.equal(process.platform, "linux");
 assert.equal(process.getuid(), 1000, "exercise the official image's default node user");
 assert.equal(fs.statSync(resolver).isFile(), true, "selected plugin must remain shipped");
-assert.equal(fs.existsSync("/app/dist/extensions/anthropic-vertex"), false, "an omitted plugin must remain omitted");
-assert.equal(fs.existsSync("/app/node_modules/openclaw"), false, "do not repair the image with a root package symlink");
+assert.equal(
+  fs.existsSync("/app/dist/extensions/anthropic-vertex"),
+  false,
+  "an omitted plugin must remain omitted",
+);
+assert.equal(
+  fs.existsSync("/app/node_modules/openclaw"),
+  false,
+  "do not repair the image with a root package symlink",
+);
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "onepassword-sdk-proof-"));
 fs.chmodSync(root, 0o700);
@@ -32,7 +40,9 @@ fs.copyFileSync(process.execPath, node);
 fs.chmodSync(node, 0o700);
 const receipt = path.join(root, "op-receipts");
 const op = path.join(root, "op");
-fs.writeFileSync(op, `#!${node}
+fs.writeFileSync(
+  op,
+  `#!${node}
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const args = process.argv.slice(2);
@@ -48,7 +58,9 @@ else if (args[3] === ${JSON.stringify(badId)}) {
   process.stderr.write(${JSON.stringify(`${token} ${rejectedValue} deliberate fake-op failure`)});
   process.exitCode = 7;
 } else throw new Error("unexpected synthetic reference");
-`, { mode: 0o700 });
+`,
+  { mode: 0o700 },
+);
 
 function runResolver(ids) {
   const result = spawnSync(process.execPath, [resolver], {
@@ -71,19 +83,38 @@ function runResolver(ids) {
 }
 
 function packageInventory() {
-  const result = spawnSync("npm", ["pack", "--dry-run", "--ignore-scripts", "--json", "--offline", "--cache", path.join(root, "npm-cache")], {
-    cwd: "/app", encoding: "utf8", timeout: 120_000, maxBuffer: 16 * 1024 * 1024,
-  });
+  const result = spawnSync(
+    "npm",
+    [
+      "pack",
+      "--dry-run",
+      "--ignore-scripts",
+      "--json",
+      "--offline",
+      "--cache",
+      path.join(root, "npm-cache"),
+    ],
+    {
+      cwd: "/app",
+      encoding: "utf8",
+      timeout: 120_000,
+      maxBuffer: 16 * 1024 * 1024,
+    },
+  );
   assert.ifError(result.error);
   assert.equal(result.status, 0, result.stderr.slice(-1500));
   const [packed] = JSON.parse(result.stdout);
-  return packed.files.map((file) => file.path).sort();
+  return packed.files.map((file) => file.path).toSorted();
 }
 
 try {
   const result = runResolver([goodId]);
   assert.equal(result.status, 0, result.stderr.slice(-1500));
-  assert.deepEqual(JSON.parse(result.stdout), { protocolVersion: 1, values: { [goodId]: value }, errors: {} });
+  assert.deepEqual(JSON.parse(result.stdout), {
+    protocolVersion: 1,
+    values: { [goodId]: value },
+    errors: {},
+  });
   const failed = runResolver([badId]);
   assert.equal(failed.status, 0, failed.stderr.slice(-1500));
   const failure = JSON.parse(failed.stdout);
@@ -92,20 +123,46 @@ try {
   assert.match(failure.errors[badId].message, /deliberate fake-op failure/u);
   assert.equal(failed.stdout.includes(token), false);
   assert.equal(failed.stdout.includes(rejectedValue), false);
-  assert.deepEqual(fs.readFileSync(receipt, "utf8").trim().split("\n").map((line) => JSON.parse(line)), [
-    { reference: goodId, uid: 1000 }, { reference: badId, uid: 1000 },
-  ]);
-  assert.equal(fs.statSync(alias).isDirectory(), true, "the shipped SDK alias must remain available");
+  assert.deepEqual(
+    fs
+      .readFileSync(receipt, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line)),
+    [
+      { reference: goodId, uid: 1000 },
+      { reference: badId, uid: 1000 },
+    ],
+  );
+  assert.equal(
+    fs.statSync(alias).isDirectory(),
+    true,
+    "the shipped SDK alias must remain available",
+  );
   const before = packageInventory();
   const backup = path.join(root, "sdk-alias-backup");
   fs.cpSync(alias, backup, { recursive: true });
   try {
     fs.rmSync(alias, { recursive: true });
-    assert.deepEqual(packageInventory(), before, "retaining the Docker SDK alias must not change npm package contents");
+    assert.deepEqual(
+      packageInventory(),
+      before,
+      "retaining the Docker SDK alias must not change npm package contents",
+    );
   } finally {
     fs.cpSync(backup, alias, { recursive: true });
   }
-  console.log(JSON.stringify({ proof: "resolver-success-and-redacted-op-failure", uid: process.getuid(), aliasPresent: true, exitCode: result.status, opCalls: 2, npmFiles: before.length, npmInventoryDelta: 0 }));
+  console.log(
+    JSON.stringify({
+      proof: "resolver-success-and-redacted-op-failure",
+      uid: process.getuid(),
+      aliasPresent: true,
+      exitCode: result.status,
+      opCalls: 2,
+      npmFiles: before.length,
+      npmInventoryDelta: 0,
+    }),
+  );
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }

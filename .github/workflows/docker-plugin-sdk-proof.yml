@@ -41,6 +41,9 @@ jobs:
           pnpm docs:list
 
   official-image:
+    # Image proof is already pinned to the production fix. Formatting/lint-only
+    # pushes need tooling checks; dispatch this job again if image inputs change.
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:

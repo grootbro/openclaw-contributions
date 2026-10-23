@@ -29,14 +29,20 @@ describe("pruneDockerPluginDist", () => {
       const packageJson = { name: `@openclaw/${id}`, type: "module" };
       write(`extensions/${id}/package.json`, packageJson);
       write(`dist/extensions/${id}/package.json`, packageJson);
-      write(`dist/extensions/${id}/index.js`, 'export { value } from "openclaw/plugin-sdk/probe";\n');
+      write(
+        `dist/extensions/${id}/index.js`,
+        'export { value } from "openclaw/plugin-sdk/probe";\n',
+      );
     }
     write("dist/extensions/node_modules/openclaw/package.json", {
       name: "openclaw",
       type: "module",
       exports: { "./plugin-sdk/probe": "./plugin-sdk/probe.js" },
     });
-    write("dist/extensions/node_modules/openclaw/plugin-sdk/probe.js", 'export const value = "retained SDK";\n');
+    write(
+      "dist/extensions/node_modules/openclaw/plugin-sdk/probe.js",
+      'export const value = "retained SDK";\n',
+    );
 
     pruneDockerPluginDist({ cwd: rootDir, env: { OPENCLAW_EXTENSIONS: "kept" } });
 
@@ -44,12 +50,16 @@ describe("pruneDockerPluginDist", () => {
     expect(fs.existsSync(path.join(rootDir, "dist/extensions/omitted"))).toBe(false);
     const entry = pathToFileURL(path.join(rootDir, "dist/extensions/kept/index.js")).href;
     expect(
-      execFileSync(process.execPath, [
-        "--input-type=module",
-        "-e",
-        "process.stdout.write((await import(process.argv[1])).value)",
-        entry,
-      ], { encoding: "utf8", timeout: 10_000 }),
+      execFileSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          "process.stdout.write((await import(process.argv[1])).value)",
+          entry,
+        ],
+        { encoding: "utf8", timeout: 10_000 },
+      ),
     ).toBe("retained SDK");
   });
 
