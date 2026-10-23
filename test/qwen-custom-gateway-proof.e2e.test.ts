@@ -18,7 +18,8 @@ const STANDARD_HOST = "dashscope-intl.aliyuncs.com";
 const TOKEN_HOST = "token-plan.ap-southeast-1.maas.aliyuncs.com";
 const STANDARD_URL = `https://${STANDARD_HOST}/compatible-mode/v1`;
 const TOKEN_URL = `https://${TOKEN_HOST}/compatible-mode/v1`;
-const TOOL_ID = "qwen-proof-read";
+// Keep the fixture ID stable through strict custom-provider replay normalization.
+const TOOL_ID = "qwenproofread";
 const FILE_CONTENT = "QWEN_PROOF_FILE_CONTENT";
 const REASONING = "QWEN_PROOF_REASONING";
 type WireMessage = { role?: string; content?: unknown; reasoning_content?: unknown; tool_call_id?: string };
