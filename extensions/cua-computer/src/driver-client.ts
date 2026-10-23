@@ -248,12 +248,7 @@ class DirectCuaDriverSession {
       return;
     }
     this.disposed = true;
-    let failure: unknown;
-    try {
-      await this.startPromise;
-    } catch (error) {
-      failure = error;
-    }
+    let failure: unknown = await this.startPromise?.catch((error: unknown) => error);
     if (this.started) {
       try {
         await this.session.endSession({ session: this.publicSession });

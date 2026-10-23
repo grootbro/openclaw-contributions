@@ -343,12 +343,7 @@ class McpCuaDriverSession implements CuaDriverSession {
       return;
     }
     this.disposed = true;
-    let failure: unknown;
-    try {
-      await this.startPromise;
-    } catch (error) {
-      failure = error;
-    }
+    let failure: unknown = await this.startPromise?.catch((error: unknown) => error);
     try {
       const client = await this.client;
       if (client.isAvailable() && this.started) {
