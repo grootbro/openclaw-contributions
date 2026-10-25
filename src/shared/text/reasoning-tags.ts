@@ -2,7 +2,7 @@ import {
   REASONING_TAG_NAMES,
   scanReasoningTags,
   stripReasoningTagsFromMarkdown,
-} from "../../../packages/markdown-core/src/reasoning-tags.js";
+} from "../../../packages/markdown-core/src/reasoning-tags-batch.js";
 import { escapeRegExp } from "../regexp.js";
 // Reasoning tag helpers find and remove model reasoning tag blocks from text.
 import { FINAL_TAG_NAME, findFinalTagMatches, stripFinalTags } from "./final-tags.js";
@@ -10,6 +10,19 @@ import { createTagNameProbe } from "./tag-name-probe.js";
 export type ReasoningTagMode = "strict" | "preserve";
 export type ReasoningTagTrim = "none" | "start" | "both";
 export type ReasoningTagScope = "all" | "leading";
+
+export const THINKING_TAG_NAMES = [
+  "think",
+  "thinking",
+  "thought",
+  "antthinking",
+  "antml:think",
+  "antml:thinking",
+  "antml:thought",
+  "mm:think",
+  "mm:thinking",
+  "mm:thought",
+] as const;
 
 const REASONING_AND_FINAL_TAG_NAMES = [...REASONING_TAG_NAMES, FINAL_TAG_NAME];
 const REASONING_OR_FINAL_TAG_RE = new RegExp(

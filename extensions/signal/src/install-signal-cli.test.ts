@@ -4,6 +4,7 @@ import path from "node:path";
 import * as tar from "tar";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createRuntimeSpies } from "../../test-support/runtime-spies.js";
+import { createStreamingResponse } from "../../test-support/streaming-error-response.js";
 
 type CapturedArchiveLimits = NonNullable<
   Parameters<typeof import("openclaw/plugin-sdk/setup-tools").extractArchive>[0]["limits"]
@@ -52,8 +53,7 @@ vi.mock("openclaw/plugin-sdk/temp-path", async (importOriginal) => {
   };
 });
 
-const { downloadToFile, installSignalCli, installSignalCliFromRelease } =
-  await import("./install-signal-cli.js");
+const { downloadToFile, installSignalCli } = await import("./install-signal-cli.js");
 
 function okDownloadResponse(body: BodyInit, init: ResponseInit = {}) {
   const result = {
@@ -219,39 +219,30 @@ it.each([
     "Failed to parse signal-cli release info.",
   ],
 ] as const)("returns metadata error for %s", async (body, status, error) => {
+  setProcessPlatform("linux", "x64");
   const { release } = okDownloadResponse(body, { status });
-  expect(await installSignalCliFromRelease(createRuntimeSpies())).toEqual({ ok: false, error });
+  expect(await installSignalCli(createRuntimeSpies())).toEqual({ ok: false, error });
   expect(fetchMock).toHaveBeenCalledOnce();
   expect(release).toHaveBeenCalledOnce();
 });
 
 it("bounds oversized GitHub release metadata and cancels the stream", async () => {
+  setProcessPlatform("linux", "x64");
   const chunkSize = 1024 * 1024;
   const chunkCount = 20; // 20 MiB — over the 16 MiB cap
-  let readCount = 0;
-  let canceled = false;
-  const oversized = new Response(
-    new ReadableStream<Uint8Array>({
-      pull(controller) {
-        if (readCount >= chunkCount) {
-          controller.close();
-          return;
-        }
-        readCount += 1;
-        controller.enqueue(new Uint8Array(chunkSize));
-      },
-      cancel() {
-        canceled = true;
-      },
-    }),
-    { status: 200, headers: { "Content-Type": "application/json" } },
-  );
+  const oversized = createStreamingResponse({
+    status: 200,
+    chunkCount,
+    chunkSize,
+    byte: 0,
+    headers: { "Content-Type": "application/json" },
+  });
   const releaseMock = vi.fn().mockResolvedValue(undefined);
-  fetchMock.mockResolvedValue({ response: oversized, release: releaseMock });
-  const result = await installSignalCliFromRelease(createRuntimeSpies());
+  fetchMock.mockResolvedValue({ response: oversized.response, release: releaseMock });
+  const result = await installSignalCli(createRuntimeSpies());
   expect(result).toEqual({ ok: false, error: "Failed to parse signal-cli release info." });
-  expect(canceled).toBe(true);
-  expect(readCount).toBeLessThan(chunkCount);
+  expect(oversized.wasCanceled()).toBe(true);
+  expect(oversized.getReadCount()).toBeLessThan(chunkCount);
   expect(releaseMock).toHaveBeenCalledTimes(1);
 });
 
@@ -259,7 +250,7 @@ it("removes the download temp dir even when extraction fails", async () => {
   setProcessPlatform("linux", "x64");
   mockRelease("0.0.0-leak-test");
   okDownloadResponse("not-a-real-archive");
-  const result = await installSignalCliFromRelease(createRuntimeSpies());
+  const result = await installSignalCli(createRuntimeSpies());
   expect(result.ok).toBe(false);
   await expectTempDownloadDirMissing();
 });
@@ -270,7 +261,7 @@ it("removes the download temp dir on the success path too", async () => {
   const archiveBytes = await fs.readFile(archivePath);
   mockRelease("0.0.0-success-test");
   okDownloadResponse(archiveBytes);
-  const result = await installSignalCliFromRelease(createRuntimeSpies());
+  const result = await installSignalCli(createRuntimeSpies());
   expect(result).toMatchObject({ ok: true, version: "0.0.0-success-test" });
   if (!result.cliPath) {
     throw new Error("expected the installed signal-cli path");
@@ -300,9 +291,7 @@ it("skips malformed asset rows while retaining a valid download", async () => {
     NATIVE_ASSET,
   ]);
   fetchMock.mockRejectedValueOnce(new Error("download failed"));
-  await expect(installSignalCliFromRelease(createRuntimeSpies())).rejects.toThrow(
-    "download failed",
-  );
+  await expect(installSignalCli(createRuntimeSpies())).rejects.toThrow("download failed");
   expect(fetchMock).toHaveBeenNthCalledWith(
     2,
     expect.objectContaining({ url: "https://example.com/linux-native.tar.gz" }),

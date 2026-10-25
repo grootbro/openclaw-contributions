@@ -3,10 +3,7 @@ import remend, { type RemendOptions } from "remend";
 import {
   findMarkdownCodeSpans,
   findMarkdownCodeRegions,
-} from "../../../packages/markdown-core/src/reasoning-tags.js";
-import { pruneMapToMaxSize } from "../../../src/infra/map-size.ts";
-import { stripUnsupportedCitationControlMarkers } from "../../../src/shared/text/citation-control-markers.js";
-import type { MarkdownDomTree } from "../lib/markdown-dom-tree.ts";
+} from "../../../packages/markdown-core/src/markdown-code-regions.js";
 import {
   consumeMarkdownRawHtmlLine,
   findMarkdownRawHtmlRanges,
@@ -14,31 +11,25 @@ import {
   type MarkdownDetailsFrame,
   scanMarkdownDisclosureLine,
 } from "./markdown-details.ts";
-import type { IncrementalMarkdownSanitizer } from "./markdown-incremental.ts";
 import { createMarkdownParser } from "./markdown-parser.ts";
-import type { MarkdownRenderEnv } from "./markdown-render-options.ts";
-import { normalizeMarkdownLineBreaks } from "./markdown-text.ts";
-
-export type StreamingMarkdownPreparation = {
-  options: string;
-  render: (source: string, env: MarkdownRenderEnv) => string;
-  sanitizer: IncrementalMarkdownSanitizer;
-  tree?: MarkdownDomTree;
-};
+import {
+  streamingMarkdownState,
+  type FenceMarker,
+  type StreamingMarkdownCursor,
+  type StreamingMarkdownSplit,
+} from "./markdown-streaming-state.ts";
 
 const FENCE_OPEN_RE = /^[ \t]{0,3}(`{3,}|~{3,})/;
 const FENCE_CONTAINER_PREFIX_RE = /^[ \t]{0,3}(?:(?:>\s?)|(?:(?:[-+*]|\d{1,9}[.)])[ \t]+))/;
 const LIST_ITEM_OPEN_RE = /^[ \t]{0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+/u;
 const LINK_REFERENCE_CANDIDATE_RE = /^[ \t]*\[/u;
 const DISCLOSURE_LINE_CANDIDATE_RE = /^[ \t]*<\/?(?:details|summary)(?=[\s>])/iu;
-const STREAMING_CACHE_LIMIT = 8;
 const STREAMING_CONTAINER_TYPES = new Set([
   "bullet_list_open",
   "ordered_list_open",
   "blockquote_open",
 ]);
 
-type FenceMarker = { length: number; marker: "`" | "~"; container: boolean };
 type StrippedMarkdownLine = { content: string; offset: number };
 
 function stripMarkdownContainerPrefixes(line: string): StrippedMarkdownLine {
@@ -96,78 +87,6 @@ function updateDetailsStack(
     lineOffset + stripped.offset,
   );
   return tags ? walkMarkdownDisclosureTags(tags, stack, { allowPendingSummary }) : false;
-}
-
-type StreamingMarkdownSplit = {
-  /** End of the stable prefix, outside unfinished block containers. */
-  boundary: number;
-  /** Absolute offset where remend may start, or null while a fence remains open. */
-  tailRepairStart: number | null;
-};
-
-type StreamingMarkdownCursor = {
-  boundary: number;
-  containerOffset: number | null;
-  hasLinkReferenceDefinition: boolean;
-  index: number;
-  lastLiteralOffset: number;
-  lineMode: "fence" | "plain" | null;
-  openFence: FenceMarker | null;
-};
-
-type StreamingMarkdownCacheEntry = {
-  cursor: StreamingMarkdownCursor;
-  markdown: string;
-  rawTail: boolean;
-  result: StreamingMarkdownSplit;
-};
-
-type StreamingMarkdownState = {
-  input?: { source: string; normalized: string };
-  split?: StreamingMarkdownCacheEntry;
-  rendered?: { options: string; markdown: string; html: string; hasHtml: boolean };
-  tail?: StreamingMarkdownPreparation;
-};
-const streamingCache = new Map<string, StreamingMarkdownState>();
-
-export function normalizeStreamingMarkdownInput(
-  markdown: string,
-  limit: number,
-  streamKey?: string,
-): string {
-  const source = stripUnsupportedCitationControlMarkers(markdown);
-  const state = streamingMarkdownState(streamKey);
-  const cached = state?.input;
-  let normalized: string;
-  if (cached && source.startsWith(cached.source)) {
-    const appended = source.slice(cached.source.length);
-    const normalizedAppend = normalizeMarkdownLineBreaks(appended);
-    normalized =
-      cached.source.endsWith("\r") && appended.startsWith("\n")
-        ? `${cached.normalized.slice(0, -1)}${normalizedAppend}`
-        : `${cached.normalized}${normalizedAppend}`;
-  } else {
-    normalized = normalizeMarkdownLineBreaks(source);
-  }
-  if (state) {
-    state.input = source.length <= limit ? { source, normalized } : undefined;
-  }
-  return normalized;
-}
-
-export function streamingMarkdownStableHtml(streamKey?: string): string {
-  return streamKey ? (streamingCache.get(streamKey)?.rendered?.html ?? "") : "";
-}
-
-export function streamingMarkdownState(streamKey?: string): StreamingMarkdownState | undefined {
-  if (!streamKey) {
-    return undefined;
-  }
-  const state = streamingCache.get(streamKey) ?? {};
-  streamingCache.delete(streamKey);
-  streamingCache.set(streamKey, state);
-  pruneMapToMaxSize(streamingCache, STREAMING_CACHE_LIMIT);
-  return state;
 }
 
 export function hasStreamingMarkdownHtml(markdown: string): boolean {

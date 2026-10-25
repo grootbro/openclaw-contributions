@@ -45,8 +45,8 @@ import { recordRuntimeContextProjection } from "../session-prompt-state.js";
 import { resolveEmbeddedAgentApiKey } from "../stream-resolution.js";
 import { prepareEmbeddedAttemptClientTools } from "./attempt-client-tools.js";
 import { createAttemptCompactionThinkingResolver } from "./attempt-compaction-thinking.js";
-import { resolveAttemptTranscriptPolicy } from "./attempt-history.js";
 import { normalizeMessagesForLlmBoundary } from "./attempt-llm-boundary.js";
+import type { LlmBoundaryOptions } from "./attempt-llm-boundary.types.js";
 import {
   replayTrailingEntriesForOrphanRepair,
   resolveOrphanRepairPlan,
@@ -58,11 +58,13 @@ import {
 import { buildAfterTurnRuntimeContext } from "./attempt-prompt-helpers.js";
 import { resolveExistingAttemptTranscriptState } from "./attempt-transcript-helpers.js";
 import type { EmbeddedAttemptTranscriptLifecycle } from "./attempt-transcript-lifecycle.js";
+import { resolveAttemptTranscriptPolicy } from "./attempt-transcript-policy.js";
 import { createUserTranscriptContextRegistry } from "./attempt-user-transcript-context-registry.js";
 import { installMessageToolTerminalHook } from "./message-tool-terminal.js";
 import {
   type InitialUserTurnReplayPreparation,
   prepareInitialPersistedUserTurnCohort,
+  prepareForeignPendingUserTurns,
   preparePersistedCurrentUserTurn,
   reconcilePrePersistedCurrentUserTurn,
 } from "./pre-persisted-user-turn.js";
@@ -293,8 +295,6 @@ type SessionBoundaryAttempt = Pick<
   | "userTurnTranscriptRecorder"
 >;
 
-type LlmBoundaryOptions = NonNullable<Parameters<typeof normalizeMessagesForLlmBoundary>[1]>;
-
 type CurrentUserTimestampOverride = NonNullable<LlmBoundaryOptions["currentUserTimestampOverride"]>;
 
 export async function prepareEmbeddedAttemptSessionBoundary(input: {
@@ -316,8 +316,11 @@ export async function prepareEmbeddedAttemptSessionBoundary(input: {
   setCurrentUserTimestampOverride: (override: CurrentUserTimestampOverride | undefined) => void;
 }> {
   const { activeSession, attempt, isRawModelRun, sessionManager } = input;
-  setSteeringRuntimeContextRetention(activeSession, input.appendOnlyRuntimeContext === true);
   const preserveExactPrompt = isRawModelRun || attempt.operation === "settled-tool-finalization";
+  const reconcileForeign = preserveExactPrompt
+    ? undefined
+    : await prepareForeignPendingUserTurns(sessionManager, input.abortSignal);
+  setSteeringRuntimeContextRetention(activeSession, input.appendOnlyRuntimeContext === true);
   if (isRawModelRun) {
     // Raw probes measure only the requested provider prompt. Restored history,
     // queued work, and the normal system prompt would contaminate it.
@@ -326,6 +329,7 @@ export async function prepareEmbeddedAttemptSessionBoundary(input: {
   }
 
   let repairedTarget: ReturnType<typeof sessionManager.getSessionTarget>;
+  let foreignInputs: ReturnType<NonNullable<typeof reconcileForeign>>;
   const orphanRepair = preserveExactPrompt
     ? undefined
     : await withSessionManagerAppend(sessionManager, async () => {
@@ -333,15 +337,18 @@ export async function prepareEmbeddedAttemptSessionBoundary(input: {
         const target = sessionManager.getSessionTarget();
         const reader = target && getOwnedSessionTranscriptReader(target);
         reader?.assertCurrent();
+        // Prefer the recorder-owned row; internal retries fold it into model-only context.
+        const currentUserTurnMessage = attempt.skipPreparedUserTurnMessage
+          ? undefined
+          : (attempt.userTurnTranscriptRecorder?.getPersistedMessage?.() ??
+            input.preparedUserTurnMessage);
+        foreignInputs = reconcileForeign?.(activeSession, currentUserTurnMessage?.idempotencyKey);
         // An adopted current user needs no orphan repair. Replay still refreshes at core entry.
         if (
           reader &&
           reconcilePrePersistedCurrentUserTurn({
             activeSession,
-            currentUserTurnMessage: attempt.skipPreparedUserTurnMessage
-              ? undefined
-              : (attempt.userTurnTranscriptRecorder?.getPersistedMessage?.() ??
-                input.preparedUserTurnMessage),
+            currentUserTurnMessage,
             durableUserTurnMessage: undefined,
             userTurnAlreadyPersisted: attempt.userTurnTranscriptRecorder?.hasPersisted() === true,
           })
@@ -351,6 +358,7 @@ export async function prepareEmbeddedAttemptSessionBoundary(input: {
         // Speech can advance the transcript while this repair waits for write admission.
         await sessionManager.reloadPersistedTranscriptAsync(input.abortSignal);
         input.abortSignal?.throwIfAborted();
+        foreignInputs = reconcileForeign?.(activeSession, currentUserTurnMessage?.idempotencyKey);
         const candidate = resolveOrphanRepairPlan({
           sessionManager,
           prompt: attempt.prompt,
@@ -358,11 +366,6 @@ export async function prepareEmbeddedAttemptSessionBoundary(input: {
             attempt.skipPreparedUserTurnMessage === true ||
             isMainSessionRestartRecoveryInputProvenance(attempt.inputProvenance),
         });
-        // Prefer the recorder-owned row; internal retries fold it into model-only context.
-        const currentUserTurnMessage = attempt.skipPreparedUserTurnMessage
-          ? undefined
-          : (attempt.userTurnTranscriptRecorder?.getPersistedMessage?.() ??
-            input.preparedUserTurnMessage);
         const reconciledCurrentUser = reconcilePrePersistedCurrentUserTurn({
           activeSession,
           currentUserTurnMessage,
@@ -381,7 +384,8 @@ export async function prepareEmbeddedAttemptSessionBoundary(input: {
         const preserveUnansweredUser =
           shouldPreserveUserFacingSessionStateForInputProvenance(attempt.inputProvenance) &&
           (!orphanProvenance || orphanProvenance.kind === "external_user");
-        if (reconciledCurrentUser || preserveUnansweredUser) {
+        const foreignOrphan = candidate && foreignInputs?.ownsEntry(candidate.messageEntry.id);
+        if (reconciledCurrentUser || preserveUnansweredUser || foreignOrphan) {
           return undefined;
         }
         if (candidate?.removeLeaf) {
@@ -452,12 +456,15 @@ export async function prepareEmbeddedAttemptSessionBoundary(input: {
   const baseConvertToLlm = activeSession.agent.convertToLlm.bind(activeSession.agent);
   activeSession.agent.convertToLlm = async (messages) => {
     let removedRuntimeContext: AgentMessage[] | undefined;
-    const normalized = normalizeMessagesForLlmBoundary(messages, {
-      ...buildBoundaryOptions(),
-      onRuntimeContextCarrierRemoved: (removed) => {
-        removedRuntimeContext = removed;
+    const normalized = normalizeMessagesForLlmBoundary(
+      foreignInputs?.omitInput(messages) ?? messages,
+      {
+        ...buildBoundaryOptions(),
+        onRuntimeContextCarrierRemoved: (removed) => {
+          removedRuntimeContext = removed;
+        },
       },
-    });
+    );
     const converted = await baseConvertToLlm(
       // Persisted carriers stay after their user turn, including during tool loops;
       // moving one would change the prefix bound to later thinking signatures.

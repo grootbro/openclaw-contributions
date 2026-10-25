@@ -1,7 +1,8 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 // Production-renderer warm interactions. Trace once for attribution; compare untraced AB pairs.
+// --thread-cpu-time excludes renderer descheduling from duration metrics.
 import { createHash } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
@@ -9,6 +10,8 @@ import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { chromium, type CDPSession, type Page } from "playwright";
 import { createControlUiE2eArtifactDir } from "../ui/src/test-helpers/control-ui-e2e-artifacts.ts";
 import {
+  controlUiBundledGatewayUrl,
+  controlUiBundledSettingsStorageKey,
   installMockGateway,
   resolvePlaywrightChromiumExecutablePath,
   startBuiltControlUiE2eServer,
@@ -21,8 +24,16 @@ import {
 } from "./lib/control-ui-interaction-scenarios.ts";
 import {
   clipInteractionCpuProfile,
+  summarizeInteractionSelectors,
   summarizeInteractionTrace,
+  summarizeLongTaskCpuProfiles,
+  type InteractionStyleSheet,
 } from "./lib/control-ui-interaction-trace.ts";
+import {
+  installControlUiResourceCounts,
+  readControlUiResourceCounts,
+  type ControlUiResourceCounts,
+} from "./lib/control-ui-resource-counts.ts";
 
 const { values } = parseArgs({
   options: {
@@ -33,9 +44,20 @@ const { values } = parseArgs({
     viewport: { type: "string", default: "both" },
     pairs: { type: "string", default: "1" },
     trace: { type: "boolean", default: false },
+    "selector-stats": { type: "boolean", default: false },
+    theme: { type: "string", default: "light" },
+    "thread-cpu-time": { type: "boolean", default: false },
+    "first-pair-screenshots": { type: "boolean", default: false },
     "invalidation-tracking": { type: "boolean", default: false },
+    "resource-counts": { type: "boolean", default: false },
+    headed: { type: "boolean", default: false },
   },
 });
+const trace = values.trace || values["selector-stats"];
+if (values.theme !== "light" && values.theme !== "dark") {
+  throw new Error("theme must be light or dark");
+}
+const theme = values.theme;
 const pairs = Number(values.pairs);
 if (!Number.isInteger(pairs) || pairs < 1) {
   throw new Error("pairs must be a positive integer");
@@ -44,8 +66,8 @@ if (!["desktop", "mobile", "both"].includes(values.viewport)) {
   throw new Error("viewport must be desktop, mobile or both");
 }
 const selectedIds = values.steps?.split(",");
-const scenarios = interactionScenarios.filter(
-  (step) => !selectedIds || selectedIds.includes(step.id),
+const scenarios = interactionScenarios.filter((step) =>
+  selectedIds ? selectedIds.includes(step.id) : !step.resourceOnly || values["resource-counts"],
 );
 if (!scenarios.length || selectedIds?.some((id) => !scenarios.some((step) => step.id === id))) {
   throw new Error("Unknown or empty interaction steps");
@@ -90,20 +112,36 @@ type Result = {
   viewport: string;
   bundle: number;
   pair: number;
-  status: "passed" | "failed";
+  status: "passed" | "failed" | "skipped";
+  hostLoadAverage: number[];
   wallMs?: number;
   scriptMs?: number;
   taskMs?: number;
   layoutMs?: number;
   styleMs?: number;
   requests?: Record<string, number>;
-  domBefore?: { nodes: number; menuItems: number };
-  domAfter?: { nodes: number; menuItems: number };
+  domBefore?: { nodes: number; menuItems: number; namedAnchors: number };
+  domAfter?: { nodes: number; menuItems: number; namedAnchors: number };
+  rowIdentity?: { initial: number; created: number; retained: number; final: number };
+  resourcesBefore?: ControlUiResourceCounts;
+  resourcesAfter?: ControlUiResourceCounts;
+  skipReason?: string;
   trace?: ReturnType<typeof summarizeInteractionTrace>;
+  longTaskDetails?: ReturnType<typeof summarizeLongTaskCpuProfiles>;
+  selectorStats?: { artifact: string; stylePasses: number; selectorCount: number };
   error?: string;
   artifactPrefix: string;
 };
 const results: Result[] = [];
+const pairHostObservations: Array<{
+  step: string;
+  viewport: string;
+  pair: number;
+  startedAt: string;
+  startLoad: number[];
+  endedAt: string;
+  endLoad: number[];
+}> = [];
 const servers: Array<{
   directory: string;
   build: { buildId: string; version: string };
@@ -112,8 +150,78 @@ const servers: Array<{
 }> = [];
 const browser = await chromium.launch({
   executablePath: resolvePlaywrightChromiumExecutablePath(chromium.executablePath()),
-  headless: true,
+  headless: !values.headed,
 });
+
+async function launchNativeVisibilityContext() {
+  const profile = await mkdtemp(path.join(artifactDir, "native-chromium-"));
+  const child = spawn(
+    resolvePlaywrightChromiumExecutablePath(chromium.executablePath()),
+    [
+      `--user-data-dir=${profile}`,
+      "--remote-debugging-port=0",
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--password-store=basic",
+      "--use-mock-keychain",
+      "about:blank",
+    ],
+    { stdio: ["ignore", "ignore", "pipe"] },
+  );
+  const stopped = new Promise<void>((resolve) => {
+    child.once("exit", () => resolve());
+  });
+  let nativeBrowser: Awaited<ReturnType<typeof chromium.connectOverCDP>> | undefined;
+  const close = async () => {
+    try {
+      await nativeBrowser?.close();
+    } finally {
+      if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGTERM");
+        await stopped;
+      }
+      await rm(profile, { recursive: true, force: true });
+    }
+  };
+  try {
+    const endpoint = await new Promise<string>((resolve, reject) => {
+      let output = "";
+      const timeout = setTimeout(() => reject(new Error("Native Chromium did not start")), 30_000);
+      child.once("error", (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      });
+      child.once("exit", () => {
+        clearTimeout(timeout);
+        reject(new Error("Native Chromium exited before connection"));
+      });
+      const readEndpoint = (data: Buffer) => {
+        output += data.toString();
+        const match = output.match(/DevTools listening on (ws:\/\/\S+)/u);
+        if (match) {
+          clearTimeout(timeout);
+          child.stderr.off("data", readEndpoint);
+          child.stderr.resume();
+          resolve(match[1]!);
+        }
+      };
+      child.stderr.on("data", readEndpoint);
+    });
+    // Playwright's normal contexts force focus/visibility even after minimization.
+    // Only this runner-owned fresh profile uses native browser visibility.
+    nativeBrowser = await chromium.connectOverCDP(endpoint, { noDefaults: true });
+    const context = nativeBrowser.contexts()[0];
+    if (!context) {
+      throw new Error("Native Chromium did not expose its default context");
+    }
+    return { context, close };
+  } catch (error) {
+    await close();
+    throw error;
+  }
+}
+
+class ScenarioSkipped extends Error {}
 try {
   for (const directory of bundles) {
     const resolved = path.resolve(directory);
@@ -144,10 +252,20 @@ try {
           cpus: os.cpus().length,
           load: os.loadavg(),
         },
-        collection: values.trace
+        collection: trace
           ? "CDP trace + 1ms CPU profiler (overhead included)"
           : "untraced CDP metrics",
-        invalidationTracking: values.trace && values["invalidation-tracking"],
+        metricTimeDomain: values["thread-cpu-time"] ? "threadTicks" : "timeTicks",
+        screenshots: values["first-pair-screenshots"] ? "first pair per cell" : "all",
+        resourceCounts: values["resource-counts"]
+          ? "Instrumented top-frame native registrations, including fixture resources; measure timings separately without this flag."
+          : false,
+        preferences: { lobsterPetVisits: false },
+        headed: values.headed,
+        invalidationTracking:
+          trace && (values["invalidation-tracking"] || values["selector-stats"]),
+        selectorStats: values["selector-stats"],
+        theme,
         fixture: { sessions: 1000, messagesPerSession: 400, models: 1000, cronJobs: 500 },
         acceptance:
           "For fixed steps: >=10 serial AB pairs per viewport, all median/p95/min/max cells reviewed; any >20% regression stops landing. No boot growth beyond 64 B.",
@@ -156,7 +274,12 @@ try {
           "No sidebar text input exists; measure command palette search separately",
           "No fake clocks, Lit probes or simulated transport delay",
         ],
-        scenarios: scenarios.map(({ id, route, expected }) => ({ id, route, expected })),
+        scenarios: scenarios.map(({ id, route, expected, fixture }) => ({
+          id,
+          route,
+          expected,
+          fixture,
+        })),
         viewports,
         bundles: servers.map(({ directory, build, indexSha256 }) => ({
           directory,
@@ -171,32 +294,76 @@ try {
   for (const viewport of viewports) {
     for (const scenario of scenarios) {
       for (let pair = 0; pair < pairs; pair++) {
+        const startedAt = new Date().toISOString();
+        const startLoad = os.loadavg();
         for (const [bundle, slot] of servers.entries()) {
-          const context = await browser.newContext({
-            viewport: { width: viewport.width, height: viewport.height },
-            serviceWorkers: "block",
-          });
-          const page = await context.newPage();
-          page.setDefaultTimeout(15_000);
-          // tsx preserves names in serialized fixture callbacks, as in the cold-load runner.
-          await page.addInitScript("globalThis.__name = (fn) => fn");
+          const nativeVisibility =
+            scenario.visibility === "hidden" && values.headed
+              ? await launchNativeVisibilityContext()
+              : undefined;
+          const context =
+            nativeVisibility?.context ??
+            (await browser.newContext({
+              viewport: { width: viewport.width, height: viewport.height },
+              serviceWorkers: "block",
+              colorScheme: theme,
+            }));
+          let page: Page;
+          try {
+            page = await context.newPage();
+            if (nativeVisibility) {
+              await page.setViewportSize({ width: viewport.width, height: viewport.height });
+              await page.emulateMedia({ colorScheme: theme });
+              await page.bringToFront();
+            }
+            page.setDefaultTimeout(15_000);
+            // tsx preserves names in serialized fixture callbacks, as in the cold-load runner.
+            await page.addInitScript("globalThis.__name = (fn) => fn");
+            await page.addInitScript(() => performance.setResourceTimingBufferSize(2048));
+            // Random per-load pets can repaint continuously; measure the selected interaction.
+            await page.addInitScript(
+              ({ key, gatewayUrl }) => {
+                if (window !== window.top) {
+                  return;
+                }
+                localStorage.setItem(key, JSON.stringify({ gatewayUrl, lobsterPetVisits: false }));
+              },
+              {
+                key: controlUiBundledSettingsStorageKey(slot.server.baseUrl),
+                gatewayUrl: controlUiBundledGatewayUrl(slot.server.baseUrl),
+              },
+            );
+            if (values["resource-counts"]) {
+              await page.addInitScript(installControlUiResourceCounts);
+            }
+          } catch (error) {
+            await nativeVisibility?.close();
+            throw error;
+          }
           const errors: string[] = [];
           page.on("pageerror", (error) => errors.push(error.message));
-          const artifactPrefix = `${viewport.name}-${scenario.id}-${pair + 1}-${bundle}`;
+          const artifactPrefix = `${viewport.name}-${theme}-${scenario.id}-${pair + 1}-${bundle}`;
           const result: Result = {
             step: scenario.id,
             viewport: viewport.name,
             pair,
             bundle,
             status: "failed",
+            hostLoadAverage: os.loadavg(),
             artifactPrefix,
           };
           let cdp: CDPSession | undefined;
           let tracing = false;
           let profiling = false;
+          let minimizedWindow: number | undefined;
           const events: unknown[] = [];
+          const styleSheets = new Map<string, InteractionStyleSheet>();
           try {
-            const fixture = createInteractionFixture(slot.build.buildId, slot.build.version);
+            const fixture = createInteractionFixture(
+              slot.build.buildId,
+              slot.build.version,
+              scenario.fixture,
+            );
             const sessions = createTeamScaleSidebarListOwner({
               rows: fixture.sessions,
               viewerProfileId: "interaction-viewer",
@@ -218,17 +385,47 @@ try {
             await scenario.prepare(page, gateway);
             await page.evaluate(() => document.fonts.ready.then(() => undefined));
             await settle(page);
+            const activePet = await page.evaluate(
+              () => document.querySelector("openclaw-lobster-pet .lobster-pet__body") !== null,
+            );
+            if (activePet) {
+              throw new Error("Warm interaction fixture must disable unrelated pet visits");
+            }
+            await page.locator(`html[data-theme-mode="${theme}"]`).waitFor({ state: "attached" });
             cdp = await context.newCDPSession(page);
-            await cdp.send("Performance.enable");
-            if (values.trace) {
+            await cdp.send("Performance.enable", {
+              timeDomain: values["thread-cpu-time"] ? "threadTicks" : "timeTicks",
+            });
+            if (values["selector-stats"]) {
+              cdp.on(
+                "CSS.styleSheetAdded",
+                ({ header }: { header: InteractionStyleSheet & { styleSheetId: string } }) =>
+                  styleSheets.set(header.styleSheetId, {
+                    sourceURL: header.sourceURL,
+                    origin: header.origin,
+                    title: header.title,
+                    startLine: header.startLine,
+                    startColumn: header.startColumn,
+                  }),
+              );
+              await cdp.send("DOM.enable");
+              await cdp.send("CSS.enable");
+            }
+            if (trace) {
               cdp.on("Tracing.dataCollected", ({ value }: { value: unknown[] }) =>
                 events.push(...value),
               );
               await cdp.send("Tracing.start", {
                 categories: [
                   "toplevel,blink.user_timing,devtools.timeline",
-                  ...(values["invalidation-tracking"]
+                  ...(values["invalidation-tracking"] || values["selector-stats"]
                     ? ["disabled-by-default-devtools.timeline.invalidationTracking"]
+                    : []),
+                  ...(values["selector-stats"]
+                    ? [
+                        "disabled-by-default-devtools.timeline.css",
+                        "disabled-by-default-blink.debug",
+                      ]
                     : []),
                 ].join(","),
                 transferMode: "ReportEvents",
@@ -239,22 +436,98 @@ try {
               await cdp.send("Profiler.start");
               profiling = true;
             }
+            if (values["resource-counts"]) {
+              result.resourcesBefore = await readControlUiResourceCounts(page);
+            }
+            if (scenario.visibility === "hidden") {
+              const { windowId } = await cdp.send("Browser.getWindowForTarget");
+              minimizedWindow = windowId;
+              await cdp.send("Browser.setWindowBounds", {
+                windowId,
+                bounds: { windowState: "minimized" },
+              });
+              // Headless Chromium accepts minimization without hiding the page.
+              // A frozen renderer would make this idle measurement meaningless.
+              const hidden = await page
+                .waitForFunction(() => document.visibilityState === "hidden", undefined, {
+                  timeout: 1_000,
+                  polling: 50,
+                })
+                .then(
+                  () => true,
+                  () => false,
+                );
+              if (!hidden) {
+                throw new ScenarioSkipped(
+                  "Native window minimization did not hide the page; use --headed on a windowed host for hidden-idle proof.",
+                );
+              }
+            }
             const requestsBefore = (await gateway.getRequests()).length;
             const countDom = () =>
               page.evaluate(() => ({
                 nodes: document.querySelectorAll("*").length,
                 menuItems: document.querySelectorAll('[role^="menuitem"]').length,
+                namedAnchors: [...document.querySelectorAll<HTMLElement>("[style]")].filter(
+                  (element) => element.style.getPropertyValue("anchor-name"),
+                ).length,
               }));
             result.domBefore = await countDom();
+            const rowProbe = scenario.rowSelector
+              ? await page.evaluateHandle((selector) => {
+                  const original = [...document.querySelectorAll(selector)];
+                  const seen = new WeakSet(original);
+                  const state = { original, created: 0 };
+                  const observer = new MutationObserver((records) => {
+                    for (const record of records) {
+                      for (const node of record.addedNodes) {
+                        if (!(node instanceof Element)) {
+                          continue;
+                        }
+                        const rows = [...node.querySelectorAll(selector)];
+                        if (node.matches(selector)) {
+                          rows.push(node);
+                        }
+                        for (const row of rows) {
+                          if (!seen.has(row)) {
+                            seen.add(row);
+                            state.created++;
+                          }
+                        }
+                      }
+                    }
+                  });
+                  observer.observe(document.body, { childList: true, subtree: true });
+                  return { state, observer };
+                }, scenario.rowSelector)
+              : undefined;
             const before = await metrics(cdp);
             await page.evaluate(() => performance.mark("interaction:start"));
             const start = performance.now();
             await scenario.run(page, gateway);
-            await settle(page);
+            if (scenario.visibility !== "hidden") {
+              await settle(page);
+            }
             result.wallMs = performance.now() - start;
             await page.evaluate(() => performance.mark("interaction:end"));
             const after = await metrics(cdp);
             result.domAfter = await countDom();
+            if (rowProbe && scenario.rowSelector) {
+              result.rowIdentity = await rowProbe.evaluate(({ state, observer }, selector) => {
+                observer.disconnect();
+                const current = new Set(document.querySelectorAll(selector));
+                return {
+                  initial: state.original.length,
+                  created: state.created,
+                  retained: state.original.filter((row) => current.has(row)).length,
+                  final: current.size,
+                };
+              }, scenario.rowSelector);
+              await rowProbe.dispose();
+            }
+            if (values["resource-counts"]) {
+              result.resourcesAfter = await readControlUiResourceCounts(page);
+            }
             for (const [key, name] of [
               ["scriptMs", "ScriptDuration"],
               ["taskMs", "TaskDuration"],
@@ -275,7 +548,12 @@ try {
             }
             result.status = "passed";
           } catch (error) {
-            result.error = String(error);
+            if (error instanceof ScenarioSkipped) {
+              result.status = "skipped";
+              result.skipReason = error.message;
+            } else {
+              result.error = String(error);
+            }
           } finally {
             const capture = async <T>(operation: () => Promise<T>): Promise<T | undefined> => {
               try {
@@ -287,6 +565,18 @@ try {
               }
             };
             try {
+              if (minimizedWindow !== undefined && cdp) {
+                const windowId = minimizedWindow;
+                await capture(() =>
+                  cdp!.send("Browser.setWindowBounds", {
+                    windowId,
+                    bounds: { windowState: "normal" },
+                  }),
+                );
+              }
+              if (values["resource-counts"] && !result.resourcesAfter) {
+                result.resourcesAfter = await capture(() => readControlUiResourceCounts(page));
+              }
               const profile =
                 profiling && cdp
                   ? await capture(async () => (await cdp!.send("Profiler.stop")).profile)
@@ -315,6 +605,23 @@ try {
                       start: "interaction:start",
                       end: "interaction:end",
                     });
+                    if (values["selector-stats"]) {
+                      const selectors = summarizeInteractionSelectors(
+                        events,
+                        result.trace,
+                        styleSheets,
+                      );
+                      const artifact = `${artifactPrefix}.selectors.json`;
+                      await writeFile(
+                        path.join(artifactDir, artifact),
+                        JSON.stringify(selectors, null, 2),
+                      );
+                      result.selectorStats = {
+                        artifact,
+                        stylePasses: selectors.stylePasses,
+                        selectorCount: selectors.selectors.length,
+                      };
+                    }
                     if (profile) {
                       const clipped = clipInteractionCpuProfile(
                         profile,
@@ -325,12 +632,21 @@ try {
                         assetBaseUrl: new URL("assets/", slot.server.baseUrl).href,
                         assetDirectory: path.join(slot.directory, "assets"),
                       });
+                      result.longTaskDetails = summarizeLongTaskCpuProfiles(
+                        {
+                          ...mapped.profile,
+                          startTime: clipped.startTime,
+                          endTime: clipped.endTime,
+                        },
+                        result.trace.longTaskIntervals,
+                      );
                       await writeFile(
                         path.join(artifactDir, `${artifactPrefix}.hotspots.json`),
                         JSON.stringify(
                           {
                             mappedFrames: mapped.mappedFrames,
                             unmappedFrames: mapped.unmappedFrames,
+                            longTasks: result.longTaskDetails,
                             ...summarizeCpuProfile(mapped.profile, { includeTables: true }),
                           },
                           null,
@@ -341,12 +657,14 @@ try {
                   }
                 });
               }
-              await capture(() =>
-                page.screenshot({ path: path.join(artifactDir, `${artifactPrefix}.png`) }),
-              );
+              if (!values["first-pair-screenshots"] || pair === 0 || result.status === "failed") {
+                await capture(() =>
+                  page.screenshot({ path: path.join(artifactDir, `${artifactPrefix}.png`) }),
+                );
+              }
             } finally {
               await capture(async () => cdp?.detach());
-              await capture(() => context.close());
+              await capture(() => (nativeVisibility ? nativeVisibility.close() : context.close()));
             }
             if (errors.length) {
               result.status = "failed";
@@ -361,6 +679,19 @@ try {
           await writeFile(path.join(artifactDir, "results.json"), JSON.stringify(results, null, 2));
           console.log(JSON.stringify(result));
         }
+        pairHostObservations.push({
+          step: scenario.id,
+          viewport: viewport.name,
+          pair,
+          startedAt,
+          startLoad,
+          endedAt: new Date().toISOString(),
+          endLoad: os.loadavg(),
+        });
+        await writeFile(
+          path.join(artifactDir, "pair-host-load.json"),
+          JSON.stringify(pairHostObservations, null, 2),
+        );
       }
     }
   }
@@ -393,8 +724,15 @@ const summary = viewports
               row.bundle === bundle &&
               row.status === "failed",
           ).length,
+          skipped: results.filter(
+            (row) =>
+              row.viewport === name &&
+              row.step === id &&
+              row.bundle === bundle &&
+              row.status === "skipped",
+          ).length,
           trace:
-            values.trace && samples.length
+            trace && samples.length
               ? Object.fromEntries(
                   (
                     [
@@ -457,7 +795,7 @@ await writeFile(
       planned: viewports.length * scenarios.length * pairs * servers.length,
       executed: results.length,
       failed: results.filter((row) => row.status === "failed").length,
-      skipped: 0,
+      skipped: results.filter((row) => row.status === "skipped").length,
       summary,
     },
     null,
@@ -484,9 +822,8 @@ const rows = summary
       ? [
           "png",
           "status.json",
-          ...(values.trace && representative.trace
-            ? ["trace.json", "hotspots.json", "cpuprofile"]
-            : []),
+          ...(trace && representative.trace ? ["trace.json", "hotspots.json", "cpuprofile"] : []),
+          ...(representative.selectorStats ? ["selectors.json"] : []),
         ]
           .map(
             (suffix) =>
@@ -494,12 +831,12 @@ const rows = summary
           )
           .join(" ")
       : "";
-    return `<tr><td>${escapeHtml(row.viewport)}</td><td>${escapeHtml(row.step)}</td><td>${row.bundle}</td><td>${row.passed}/${row.failed}</td><td>${metric("scriptMs")}</td><td>${metric("taskMs")}</td><td>${metric("layoutMs")}</td><td>${metric("styleMs")}</td><td>${row.trace?.longTasks?.median ?? "—"}</td><td>${links}</td></tr>`;
+    return `<tr><td>${escapeHtml(row.viewport)}</td><td>${escapeHtml(row.step)}</td><td>${row.bundle}</td><td>${row.passed}/${row.failed}/${row.skipped}</td><td>${metric("scriptMs")}</td><td>${metric("taskMs")}</td><td>${metric("layoutMs")}</td><td>${metric("styleMs")}</td><td>${row.trace?.longTasks?.median ?? "—"}</td><td>${links}</td></tr>`;
   })
   .join("\n");
 await writeFile(
   path.join(artifactDir, "report.html"),
-  `<!doctype html><meta charset="utf-8"><title>Warm interactions</title><style>body{font:15px system-ui;padding:24px}table{border-collapse:collapse}td,th{padding:8px;border:1px solid #bbb;text-align:left}a{margin-right:6px}</style><h1>Production-renderer warm interactions</h1><p>${values.trace ? "Trace and CPU sampling overhead included." : "Untraced CDP metric deltas."} Cells: median / p95 / min–max (ms). Wall time in JSON is automation-to-assertion, not INP. Synthetic Gateway; native clocks. <a href="manifest.json">Manifest</a> <a href="summary.json">Summary</a></p><table><tr><th>Viewport</th><th>Step</th><th>Bundle</th><th>Pass/fail</th><th>Script</th><th>Task</th><th>Layout</th><th>Style</th><th>Long tasks</th><th>Evidence</th></tr>${rows}</table>`,
+  `<!doctype html><meta charset="utf-8"><title>Warm interactions</title><style>body{font:15px system-ui;padding:24px}table{border-collapse:collapse}td,th{padding:8px;border:1px solid #bbb;text-align:left}a{margin-right:6px}</style><h1>Production-renderer warm interactions</h1><p>${trace ? "Trace and CPU sampling overhead included." : "Untraced CDP metric deltas."} ${values["selector-stats"] ? "CSS selector instrumentation overhead included; selectors ranked by elapsed microseconds." : ""} Theme: ${theme}. Cells: median / p95 / min–max (ms). Wall time in JSON is automation-to-assertion, not INP. Synthetic Gateway; native clocks. <a href="manifest.json">Manifest</a> <a href="summary.json">Summary</a></p><table><tr><th>Viewport</th><th>Step</th><th>Bundle</th><th>Pass/fail/skip</th><th>Script</th><th>Task</th><th>Layout</th><th>Style</th><th>Long tasks</th><th>Evidence</th></tr>${rows}</table>`,
 );
 console.log(`Warm interaction artifacts: ${artifactDir}`);
 if (results.some((result) => result.status === "failed")) {

@@ -158,6 +158,23 @@ afterEach(async () => {
 });
 
 describe("widget-card", () => {
+  it("retains saved geometry while active widget content waits for admission", () => {
+    const preview = documentPreview("saved-widget", { sandbox: "strict" });
+    const widgetLayout = { read: vi.fn(() => 700), write: vi.fn() };
+    const host = mountWidget(preview, { mediaReadAllowed: false, widgetLayout });
+    const shell = host.querySelector('[data-content-kind="canvas-html"]');
+    expect(shell).not.toBeNull();
+    expect(
+      shell?.querySelector<HTMLElement>(".chat-tool-card__preview-panel > div")?.style.minHeight,
+    ).toBe("700px");
+    expect(host.querySelector("iframe")).toBeNull();
+    expect(actionButton(host)).toBeNull();
+
+    mountWidget(preview, { mediaReadAllowed: true, widgetLayout }, host);
+    expect(host.querySelector('[data-content-kind="canvas-html"]')).toBe(shell);
+    expect(host.querySelector("iframe")?.style.height).toBe("700px");
+  });
+
   it.each(["transcript", "strict transcript", "sidebar"] as const)(
     "retains the %s document through a blip and retires it on identity or access change",
     async (surface) => {
@@ -266,8 +283,16 @@ describe("widget-card", () => {
     vi.stubGlobal(
       "ResizeObserver",
       class {
-        observe() {}
-        disconnect() {}
+        private readonly targets = new Set<Element>();
+        observe(target: Element) {
+          this.targets.add(target);
+        }
+        unobserve(target: Element) {
+          this.targets.delete(target);
+        }
+        disconnect() {
+          this.targets.clear();
+        }
       },
     );
     onTestFinished(() => {
@@ -710,14 +735,30 @@ describe("widget-card", () => {
   it("releases placement observation while a retained widget is hidden", () => {
     const observers: ResizeObserverStub[] = [];
     class ResizeObserverStub implements ResizeObserver {
-      observe = vi.fn();
-      unobserve = vi.fn();
-      disconnect = vi.fn();
+      private readonly targets = new Set<Element>();
+      observe = vi.fn((target: Element) => {
+        this.targets.add(target);
+      });
+      unobserve = vi.fn((target: Element) => {
+        this.targets.delete(target);
+      });
+      disconnect = vi.fn(() => {
+        this.targets.clear();
+      });
       constructor(private readonly callback: ResizeObserverCallback) {
         observers.push(this);
       }
       deliver() {
-        this.callback([], this);
+        this.callback(
+          [...this.targets].map((target) => ({
+            target,
+            contentRect: new DOMRectReadOnly(),
+            borderBoxSize: [],
+            contentBoxSize: [],
+            devicePixelContentBoxSize: [],
+          })),
+          this,
+        );
       }
     }
     vi.stubGlobal("ResizeObserver", ResizeObserverStub);

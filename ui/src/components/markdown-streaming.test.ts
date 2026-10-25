@@ -4,8 +4,8 @@ import { waitForSolid } from "../test-helpers/solid-settle.ts";
 import * as markdownDetails from "./markdown-details.ts";
 import { splitStableStreamingMarkdown } from "./markdown-streaming.ts";
 import * as markdownText from "./markdown-text.ts";
-import { htmlFragment } from "./markdown.test-support.ts";
-import { toSanitizedMarkdownHtml, toStreamingMarkdownParts } from "./markdown.ts";
+import { htmlFragment, toStreamingMarkdownParts } from "./markdown.test-support.ts";
+import { toSanitizedMarkdownHtml } from "./markdown.ts";
 
 const sanitizedInputLengths = vi.hoisted(() => {
   // Cached markdown sanitizers must be created through this file's factory wrapper.
@@ -38,13 +38,7 @@ vi.mock(import("dompurify"), async (importOriginal) => {
     const sanitize = purifier.sanitize.bind(purifier);
     vi.spyOn(purifier, "sanitize").mockImplementation((...args) => {
       const [input] = args;
-      sanitizedInputLengths.push(
-        typeof input === "string"
-          ? input.length
-          : input instanceof Element
-            ? input.outerHTML.length
-            : (input.textContent?.length ?? 0),
-      );
+      sanitizedInputLengths.push(typeof input === "string" ? input.length : 0);
       return sanitize(...args);
     });
     return purifier;
@@ -59,27 +53,6 @@ beforeAll(async () => {
 });
 
 describe("toStreamingMarkdownParts", () => {
-  it("sanitizes only changed inline subtrees while unresolved syntax grows", () => {
-    const prefix = "A paragraph with **completed bold**, `inline code`, and ";
-    const sources = Array.from(
-      { length: 24 },
-      (_, index) => prefix + "more text ".repeat(index + 1),
-    );
-    const expected = sources.map((source) => streamHtml(source));
-    const htmlAssignments = vi.spyOn(Element.prototype, "innerHTML", "set");
-    onTestFinished(() => htmlAssignments.mockRestore());
-    withSanitizerBudget(() => {
-      for (const [index, source] of sources.entries()) {
-        expect(streamHtml(source, {}, "incremental-inline-sanitizer")).toBe(expected[index]);
-      }
-      // The completed emphasis/code never re-enter DOMPurify on tail appends.
-      expect(sanitizedChars()).toBeLessThan(
-        sources.reduce((sum, source) => sum + source.length, 0),
-      );
-      expect(htmlAssignments.mock.calls.length).toBeLessThan(sources.length / 3);
-    });
-  });
-
   it("renders completed paragraphs with linear sanitizer input", () => {
     let source = "";
     withSanitizerBudget(() => {

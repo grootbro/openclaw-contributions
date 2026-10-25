@@ -25,6 +25,14 @@ read_when:
 Plugin attribution is span-only. It does not add a plugin dimension to shared
 OpenTelemetry metrics or change Prometheus metric labels.
 
+Embedded and simple model requests compute prompt component sizes only when a
+diagnostic subscriber requests them. Activity tracking, the stability recorder,
+Prometheus, and metrics-only OpenTelemetry do not request these sizes. Tracing
+retains the same pre-provider JSON character counts; these are distinct from the
+encoded request's UTF-8 byte count. Internal diagnostic subscribers can set
+`includePromptStats: false` in their event filter to avoid requesting this work.
+Omitting the option preserves prompt statistics for interested subscribers.
+
 - `openclaw.run`
   - `openclaw.outcome`, `openclaw.channel`, `openclaw.provider`, `openclaw.model`, `openclaw.errorCategory`, optional `openclaw.agent`
 - `openclaw.model.call`
@@ -34,6 +42,7 @@ OpenTelemetry metrics or change Prometheus metric labels.
   - `openclaw.model_call.request_bytes`, `openclaw.model_call.response_bytes`, `openclaw.model_call.time_to_first_byte_ms`
   - `openclaw.model_call.prompt.input_messages_count`, `openclaw.model_call.prompt.input_messages_chars`, `openclaw.model_call.prompt.system_prompt_chars`, `openclaw.model_call.prompt.tool_definitions_count`, `openclaw.model_call.prompt.tool_definitions_chars`, `openclaw.model_call.prompt.total_chars` (safe component sizes only, no prompt text)
   - `openclaw.model_call.usage.*` and `gen_ai.usage.*` when the result carries usage for that request or aggregate turn
+  - Cache-write totals remain in `openclaw.model_call.usage.cache_creation_input_tokens` and `gen_ai.usage.cache_creation.input_tokens`. When reported, `openclaw.model_call.usage.cache_creation_input_tokens_1h` and `openclaw.model_call.usage.cache_creation_input_tokens_5m` carry the provider’s TTL buckets verbatim, including zero; unreported buckets stay absent. TTL subsets are OpenClaw-specific so generic usage consumers do not price both the total and its breakdown.
   - Span event `openclaw.provider.request` with attribute `openclaw.upstreamRequestIdHash` (bounded, hash-based) when the upstream provider result exposes a request id; raw ids are never exported
   - Codex turn span event `openclaw.model.response.observed` with `openclaw.upstreamRequestIdHash`, `openclaw.model_response.timestamp_source = receipt`, `openclaw.model_response.usage_source = native-normalized`, `openclaw.model_response.usage_scope = response`, and known `openclaw.model_call.usage.*` / `gen_ai.usage.*` fields. It records an untimed native response observation and does not increment usage metrics.
   - With `OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental`, request spans use the latest GenAI inference span name `{gen_ai.operation.name} {gen_ai.request.model}`. Turn spans use `invoke_agent` because OpenClaw does not claim a native agent name from the opaque CLI boundary. Both use `CLIENT` span kind instead of `openclaw.model.call`.
@@ -117,6 +126,9 @@ permanently exhaustive.
 
 Events with no interested subscriber or tracing exporter are discarded before
 payload enrichment and queuing; they are not buffered for future subscribers.
+Queued events capture their payloads when emitted, so later producer changes do
+not change delivery. Listeners share immutable plain-data snapshots; opaque
+values such as maps and typed arrays retain separate listener copies.
 
 `agent.commentary` records completed preambles, not text deltas. It carries the
 original agent-event sequence and timestamp and attaches to the active harness
