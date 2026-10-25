@@ -225,7 +225,7 @@ ${program}
     {
       entry: runtimeProcessEntrypoints.nodeWorkspaceManifest,
       program: REMOTE_WORKSPACE_MANIFEST_JS,
-      structuralRules: ["curly", "no-shadow", "no-unused-vars"],
+      structuralRules: ["curly", "no-shadow"],
     },
     {
       entry: runtimeProcessEntrypoints.nodeWorkspaceGitHistory,
