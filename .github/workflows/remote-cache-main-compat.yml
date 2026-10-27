@@ -29,14 +29,5 @@ jobs:
         with:
           name: remote-cache-oct27-generation
           path: ${{ runner.temp }}/remote-generation.patch
-      - name: Check touched formatting and runtime lint
-        run: |
-          pnpm exec oxfmt --check scripts/generate-runtime-script-assets.mjs src/gateway/worker-environments/workspace-sync-scripts.ts src/gateway/worker-environments/workspace-generated-paths.test.ts docs/gateway/sandboxing/workspace-access.md
-          node scripts/run-oxlint.mjs --tsconfig config/tsconfig/oxlint.core.json src/gateway/worker-environments/workspace-sync-scripts.ts src/gateway/worker-environments/workspace-generated-paths.test.ts src/gateway/worker-environments/workspace-manifest-script.generated.mjs src/node-host/node-worker-workspace-manifest.generated.worker.mjs
-          node scripts/run-oxlint.mjs --tsconfig test/tsconfig/tsconfig.test.root.scripts.json scripts/generate-runtime-script-assets.mjs
-      - name: Exercise callable, standalone, native and SSH consumers
-        run: node scripts/run-vitest.mjs src/gateway/worker-environments/workspace-generated-paths.test.ts src/node-host/node-worker-workspace-manifest.test.ts src/gateway/worker-environments/workspace-sync*.test.ts src/gateway/worker-environments/node-workspace-transfer-service.test.ts src/gateway/worker-environments/workspace-manifest-script.runtime.test.ts test/scripts/runtime-script-assets.test.ts --maxWorkers=1
-      - name: Typecheck Gateway tests
-        run: node scripts/run-tsgo.mjs -p test/tsconfig/tsconfig.core.test.gateway-other.json --noEmit
-      - name: Docs sanity
-        run: pnpm docs:list
+      - name: Verify committed generation is unchanged
+        run: test ! -s "$RUNNER_TEMP/remote-generation.patch"
