@@ -62,13 +62,6 @@ export async function runWorkspaceManifestProgram(
       relativePath.startsWith(MATERIALIZED_SANDBOX_SKILLS_WORKSPACE + "/")
     );
   }
-  const DERIVED_WORKSPACE_DIRECTORY_NAMES = new Set([
-    "__pycache__",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".ruff_cache",
-    "node_modules",
-  ]);
   const DERIVED_WORKSPACE_ROOT_PATHS = [
     ".cache/vitest",
     ".cache/bun-transpiler",
@@ -96,10 +89,8 @@ export async function runWorkspaceManifestProgram(
     return retained;
   }
   const RUNTIME_WORKSPACE_ROOT_PATHS = [".artifacts/dist-artifacts.lock", ".openclaw/tmp"];
-  const DERIVED_WORKSPACE_FILE_NAMES = new Set([".DS_Store"]);
-  const DERIVED_WORKSPACE_FILE_SUFFIXES = [".pyc", ".pyo"];
-  const WORKER_ATTACHMENT_DIRECTORY_RE = new RegExp(
-    "^openclaw-inbound-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]$",
+  const DERIVED_WORKSPACE_SEGMENT_RE = new RegExp(
+    "(?:^|/)(?:__pycache__|\\.pytest_cache|\\.mypy_cache|\\.ruff_cache|node_modules|\\.DS_Store|[^/]*\\.pyc|[^/]*\\.pyo|openclaw-inbound-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])(?![^/])",
   );
   function isRuntimeOwnedWorkspacePath(relativePath) {
     return (
@@ -124,15 +115,7 @@ export async function runWorkspaceManifestProgram(
     ) {
       return true;
     }
-    const segments = relativePath.split("/");
-    // "$" can match before a final newline; require the entire path segment.
-    return segments.some(
-      (segment) =>
-        WORKER_ATTACHMENT_DIRECTORY_RE.exec(segment)?.[0] === segment ||
-        DERIVED_WORKSPACE_DIRECTORY_NAMES.has(segment) ||
-        DERIVED_WORKSPACE_FILE_NAMES.has(segment) ||
-        DERIVED_WORKSPACE_FILE_SUFFIXES.some((suffix) => segment.endsWith(suffix)),
-    );
+    return DERIVED_WORKSPACE_SEGMENT_RE.test(relativePath);
   }
   function projectWorkspaceEntries(entries, isRetainedInput, excludeBuildCaches = false) {
     const nonemptyDirectories = new Set();
@@ -323,19 +306,6 @@ export async function runWorkspaceManifestProgram(
       ),
     });
   }
-  // A staging operation can create .git in a plain workspace. Only the admitted
-  // Git base enables build-cache projection; filesystem metadata is not admission.
-  const excludeBuildCaches = Boolean(requestedBaseCommit);
-  const retainedBuildCacheInputs = new Set();
-  function retainBuildCacheInput(relative) {
-    for (const entry of buildCacheInputPaths([relative])) retainedBuildCacheInputs.add(entry);
-  }
-  function isRetainedWorkspaceInput(relative) {
-    return isStagedInput(relative) || retainedBuildCacheInputs.has(relative);
-  }
-  function isExcludedWorkspacePath(relative) {
-    return isDerivedWorkspacePath(relative, isRetainedWorkspaceInput(relative), excludeBuildCaches);
-  }
   function recordEntry(relative, entry) {
     assertManifestCurrent();
     if (entriesByPath.has(relative)) return;
@@ -367,7 +337,7 @@ export async function runWorkspaceManifestProgram(
     ) {
       fail("unsafe worker workspace path: " + relative);
     }
-    if (isExcludedWorkspacePath(relative)) return;
+    if (isDerivedWorkspacePath(relative, isStagedInput(relative))) return;
     if (entriesByPath.has(relative)) return;
     const absolute = path.join(root, relative);
     let stats;
@@ -400,7 +370,7 @@ export async function runWorkspaceManifestProgram(
     }
   }
   function addWithParents(relative) {
-    if (isExcludedWorkspacePath(relative)) return;
+    if (isDerivedWorkspacePath(relative, isStagedInput(relative))) return;
     const segments = relative.split("/");
     for (let index = 1; index < segments.length; index += 1) {
       addEntry(segments.slice(0, index).join("/"));
@@ -419,7 +389,7 @@ export async function runWorkspaceManifestProgram(
         if (!entry) break;
         const relative = relativeDirectory ? relativeDirectory + "/" + entry.name : entry.name;
         if (!relativeDirectory && entry.name === ".git") continue;
-        if (isExcludedWorkspacePath(relative)) {
+        if (isDerivedWorkspacePath(relative, isStagedInput(relative))) {
           hasDerivedEntry = true;
           continue;
         }
@@ -478,52 +448,7 @@ export async function runWorkspaceManifestProgram(
     }
     return prior.entries;
   }
-  async function readIgnoredWorkspacePaths() {
-    const includePath = path.join(root, ".worktreeinclude");
-    const hasIncludes = fs.existsSync(includePath) && fs.lstatSync(includePath).isFile();
-    const ignored = new Set(
-      await nulPaths([
-        "--full-name",
-        "--others",
-        "--ignored",
-        "--exclude-standard",
-        ...(hasIncludes ? [] : ["--", ":(glob)media/inbound/openclaw-staged-*/**"]),
-      ]),
-    );
-    const included = [];
-    if (hasIncludes) {
-      // Standard excludes would select every ignored path, not just explicit inputs.
-      for (const candidate of await nulPaths([
-        "--full-name",
-        "--others",
-        "--ignored",
-        "--exclude-from=" + includePath,
-      ])) {
-        if (ignored.has(candidate)) included.push(candidate);
-      }
-    }
-    return { ignored, included };
-  }
-  async function initializeBuildCacheInputs() {
-    if (!excludeBuildCaches) return undefined;
-    for (const relative of await nulPaths(["--full-name", "--cached"])) {
-      retainBuildCacheInput(relative);
-    }
-    const manifestRoot = path.join(process.env.HOME, ".openclaw-worker", "manifests");
-    for (const digest of priorManifestDigests) {
-      for (const entry of readPriorManifestEntries(manifestRoot, digest)) {
-        if (!entry || typeof entry.path !== "string")
-          fail("invalid prior workspace manifest entry");
-        // Older receipts cannot distinguish generated caches from original inputs.
-        // Preserve their exact paths while excluding newly generated descendants.
-        retainBuildCacheInput(entry.path);
-      }
-    }
-    const ignoredPaths = await readIgnoredWorkspacePaths();
-    for (const relative of ignoredPaths.included) retainBuildCacheInput(relative);
-    return ignoredPaths;
-  }
-  async function eligiblePaths(ignoredPaths) {
+  async function eligiblePaths() {
     const selected = new Set();
     let selectedPathBytes = 0;
     function addSelected(relative) {
@@ -536,12 +461,6 @@ export async function runWorkspaceManifestProgram(
         fail("worker workspace Git path candidates exceed their byte limit");
       }
       selected.add(relative);
-      // Existing initial callers capture immediately after checkout/transfer,
-      // before guest work. Preserve that selection, including host-staged inputs
-      // absent from the worker index. Later captures have a prior receipt instead.
-      if (excludeBuildCaches && priorManifestDigests.length === 0) {
-        retainBuildCacheInput(relative);
-      }
     }
     for (const relative of await nulPaths([
       "--full-name",
@@ -551,11 +470,32 @@ export async function runWorkspaceManifestProgram(
     ])) {
       addSelected(relative);
     }
-    const { ignored, included } = ignoredPaths ?? (await readIgnoredWorkspacePaths());
+    const includePath = path.join(root, ".worktreeinclude");
+    const hasIncludes = fs.existsSync(includePath) && fs.lstatSync(includePath).isFile();
+    const ignored = new Set(
+      await nulPaths([
+        "--full-name",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        ...(hasIncludes ? [] : ["--", ":(glob)media/inbound/openclaw-staged-*/**"]),
+      ]),
+    );
     for (const candidate of ignored) {
       if (isStagedInput(candidate)) addSelected(candidate);
     }
-    for (const candidate of included) addSelected(candidate);
+    if (hasIncludes) {
+      // Keep standard excludes out of this query. Their union would select every
+      // ignored path instead of only explicit .worktreeinclude matches.
+      for (const candidate of await nulPaths([
+        "--full-name",
+        "--others",
+        "--ignored",
+        "--exclude-from=" + includePath,
+      ])) {
+        if (ignored.has(candidate)) addSelected(candidate);
+      }
+    }
     for (const priorManifestDigest of priorManifestDigests) {
       const manifestRoot = path.join(process.env.HOME, ".openclaw-worker", "manifests");
       const priorEntries = readPriorManifestEntries(manifestRoot, priorManifestDigest);
@@ -565,14 +505,13 @@ export async function runWorkspaceManifestProgram(
       }
       for (const entry of projectWorkspaceEntries(
         priorEntries.toSorted(compareManifestPaths),
-        isRetainedWorkspaceInput,
-        excludeBuildCaches,
+        isStagedInput,
       )) {
         addSelected(entry.path);
       }
     }
     return [...selected]
-      .filter((relative) => !isExcludedWorkspacePath(relative))
+      .filter((relative) => !isDerivedWorkspacePath(relative, isStagedInput(relative)))
       .toSorted(comparePathNames);
   }
   function assertSerializedManifestBudget(baseCommit, entries) {
@@ -820,10 +759,8 @@ export async function runWorkspaceManifestProgram(
       );
       return;
     }
-    const ignoredPaths = await initializeBuildCacheInputs();
-    assertManifestCurrent();
     if (eligibleOnly) {
-      for (const relative of await eligiblePaths(ignoredPaths)) addWithParents(relative);
+      for (const relative of await eligiblePaths()) addWithParents(relative);
     } else {
       walk("");
     }

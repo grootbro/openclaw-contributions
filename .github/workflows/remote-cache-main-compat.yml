@@ -5,9 +5,9 @@ on:
 permissions:
   contents: read
 jobs:
-  generated-lint-repair:
+  capture-compatibility:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       OPENCLAW_VITEST_RUNTIME: node
     steps:
@@ -19,20 +19,24 @@ jobs:
           node-version: 26.12.1
           install-bun: "false"
           cache-mode: "off"
-      - name: Regenerate artifacts from the corrected generator
+      - name: Regenerate canonical runtime assets
         run: |
           pnpm runtime:scripts:gen
           pnpm runtime:scripts:check
           git diff > "$RUNNER_TEMP/remote-generation.patch"
+          git diff --name-only
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: lint-repair-generation
+          name: remote-cache-oct27-generation
           path: ${{ runner.temp }}/remote-generation.patch
-      - name: Check generated runtime lint and canonical callers
-        run: node scripts/run-oxlint.mjs --tsconfig config/tsconfig/oxlint.core.json src/gateway/worker-environments/workspace-sync-scripts.ts src/gateway/worker-environments/workspace-generated-paths.test.ts src/gateway/worker-environments/workspace-manifest-script.generated.mjs src/node-host/node-worker-workspace-manifest.generated.worker.mjs
-      - name: Lint and format the generator
+      - name: Check touched formatting and runtime lint
         run: |
+          pnpm exec oxfmt --check scripts/generate-runtime-script-assets.mjs src/gateway/worker-environments/workspace-sync-scripts.ts src/gateway/worker-environments/workspace-generated-paths.test.ts docs/gateway/sandboxing/workspace-access.md
+          node scripts/run-oxlint.mjs --tsconfig config/tsconfig/oxlint.core.json src/gateway/worker-environments/workspace-sync-scripts.ts src/gateway/worker-environments/workspace-generated-paths.test.ts src/gateway/worker-environments/workspace-manifest-script.generated.mjs src/node-host/node-worker-workspace-manifest.generated.worker.mjs
           node scripts/run-oxlint.mjs --tsconfig test/tsconfig/tsconfig.test.root.scripts.json scripts/generate-runtime-script-assets.mjs
-          pnpm exec oxfmt --check scripts/generate-runtime-script-assets.mjs
-      - name: Verify generation freshness and both capture runtimes
-        run: node scripts/run-vitest.mjs test/scripts/runtime-script-assets.test.ts src/gateway/worker-environments/workspace-manifest-script.runtime.test.ts src/gateway/worker-environments/workspace-generated-paths.test.ts --maxWorkers=1
+      - name: Exercise callable, standalone, native and SSH consumers
+        run: node scripts/run-vitest.mjs src/gateway/worker-environments/workspace-generated-paths.test.ts src/node-host/node-worker-workspace-manifest.test.ts src/gateway/worker-environments/workspace-sync*.test.ts src/gateway/worker-environments/node-workspace-transfer-service.test.ts src/gateway/worker-environments/workspace-manifest-script.runtime.test.ts test/scripts/runtime-script-assets.test.ts --maxWorkers=1
+      - name: Typecheck Gateway tests
+        run: node scripts/run-tsgo.mjs -p test/tsconfig/tsconfig.core.test.gateway-other.json --noEmit
+      - name: Docs sanity
+        run: pnpm docs:list
