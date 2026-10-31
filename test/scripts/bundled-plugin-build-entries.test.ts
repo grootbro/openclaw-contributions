@@ -40,14 +40,6 @@ function collectBuildSources(params?: Parameters<typeof collectBundledPluginBuil
 }
 
 describe("bundled plugin build entries", () => {
-  it("does not classify extension dependency directories as omitted plugins", () => {
-    const cwd = tempDirs.make("openclaw-excluded-dependency-dir-");
-    write(cwd, "package.json", {
-      files: ["dist/**", "!dist/extensions/node_modules/**", "!dist/extensions/omitted-plugin/**"],
-    });
-    expect(collectRootPackageExcludedExtensionDirs({ cwd })).toEqual(new Set(["omitted-plugin"]));
-  });
-
   it("preserves tracked entry names and ignores deleted or untracked plugin inputs", () => {
     const cwd = tempDirs.make("openclaw-tracked-plugin-entries-");
     const writeFile = (name: string, contents?: unknown) => write(cwd, name, contents);
@@ -398,6 +390,7 @@ describe("bundled plugin build entries", () => {
   it("keeps bundled channel secret contracts on packed top-level sidecars", () => {
     const artifacts = listBundledPluginPackArtifacts();
     const excludedPackageDirs = collectRootPackageExcludedExtensionDirs();
+    expect(excludedPackageDirs.has("node_modules")).toBe(false);
     const secretBackedPluginIds = new Set<string>();
     for (const { entryPath, entry, pluginId } of bundledChannelEntries()) {
       if (!entry.includes('exportName: "channelSecrets"')) {
