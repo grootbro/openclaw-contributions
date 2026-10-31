@@ -16,6 +16,7 @@ import type {
 import { createDeferredCore, type Deferred } from "../shared/deferred.js";
 import { runInDetachedAsyncContext } from "../shared/detached-async-context.js";
 import { notifyListeners } from "../shared/listeners.js";
+import { encodeOwnedBuffer } from "../shared/owned-buffer.js";
 import type { DeliveryContext } from "../utils/delivery-context.types.js";
 import { clampWithDefault, readEnvInt } from "./bash-tools.shared.js";
 
@@ -153,6 +154,14 @@ export interface ProcessSession {
   readonly cleanupMs: number;
   /** Agent owner frozen when the exec process starts. */
   agentId?: string;
+  /** Systemd hosts the tree; the registry still owns observation and retention. */
+  durable?: {
+    observe: () => Promise<void>;
+    cancel: (assertCurrent?: () => void) => void;
+    remove: () => void;
+    finalize: () => Promise<void>;
+    drain: () => Promise<void>;
+  };
   /** Run whose exec call started this process; completion provenance only, never authority. */
   originRunId?: string;
   /** Start-time routing policy for detached exec system events. */
@@ -160,9 +169,6 @@ export interface ProcessSession {
   notifyDeliveryContext?: DeliveryContext;
   notifySessionTarget?: SessionEventTarget;
   assertExitNotificationAcceptanceCurrent?: () => void;
-  persistExitNotification?: () => Promise<void>;
-  exitNotificationPersistence?: Promise<void>;
-  clearExitNotification?: () => Promise<void>;
   notifyOnExit?: boolean;
   notifyOnExitEmptySuccess?: boolean;
   exitNotified?: boolean;
@@ -249,6 +255,13 @@ const activeExecSessions = new Map<
 let finishedSessionOutputChars = 0;
 
 let sweeper: NodeJS.Timeout | null = null;
+let observeDurableProcesses: (() => Promise<void>) | undefined;
+
+/** Reuse the retention timer for bounded durable-unit observation. */
+export function setDurableProcessObserver(observer: (() => Promise<void>) | undefined) {
+  observeDurableProcesses = observer;
+  scheduleSweeper();
+}
 type ProcessChange = { sessionKey: string; agentId?: string };
 const changeListeners = new Set<(target: ProcessChange) => void>();
 const pendingChanges = new Map<string, ProcessChange>();
@@ -286,7 +299,7 @@ function queueProcessChange(session: ProcessSession) {
       }
     }, 5_000),
   );
-  changeTimer.unref?.();
+  changeTimer.unref();
 }
 
 /** Return whether a process session id is live, retained, or reserved for notification. */
@@ -302,6 +315,9 @@ export function addSession(session: ProcessSession) {
   activeExecSessions.set(session.id, { session, promoted: session.backgrounded });
   if (session.backgrounded) {
     queueProcessChange(session);
+  }
+  if (session.durable) {
+    scheduleSweeper();
   }
 }
 
@@ -342,6 +358,7 @@ function deleteFinishedSession(id: string): boolean {
   }
   finishedSessions.delete(id);
   finishedSessionOutputChars -= session.output.length;
+  session.durable?.remove();
   queueProcessChange(session);
   return true;
 }
@@ -390,7 +407,7 @@ export function appendOutput(session: ProcessSession, stream: "stdout" | "stderr
   // Own only the retained suffix; producer strings may borrow a large callback.
   const ownedChunk = {
     order: session.totalOutputChars,
-    text: Buffer.from(
+    text: encodeOwnedBuffer(
       sliceUtf16Safe(chunk, Math.max(0, chunk.length - session.maxOutputChars)),
       "utf16le",
     ),
@@ -538,7 +555,6 @@ export function markBackgrounded(session: ProcessSession) {
   if (active?.session === session) {
     active.promoted = true;
   }
-  session.exitNotificationPersistence ??= session.persistExitNotification?.();
 }
 
 /** Retains the precise completion-event removal handle on its process owner. */
@@ -563,11 +579,7 @@ export function acknowledgeNotifyOnExit(record: {
 }
 
 /** Retire notification custody without claiming that retained output was observed. */
-export function removeNotifyOnExit(record: {
-  notifyOnExitRemoval?: NotifyOnExitRemoval;
-  clearExitNotification?: () => Promise<void>;
-}): void {
-  void record.clearExitNotification?.();
+export function removeNotifyOnExit(record: { notifyOnExitRemoval?: NotifyOnExitRemoval }): void {
   const remove = record.notifyOnExitRemoval;
   if (!remove) {
     return;
@@ -579,8 +591,8 @@ export function removeNotifyOnExit(record: {
 /** Returns the number of live background exec sessions without exposing process details. */
 export function getActiveBackgroundExecSessionCount(): number {
   let count = 0;
-  for (const { promoted } of activeExecSessions.values()) {
-    if (promoted) {
+  for (const { promoted, session } of activeExecSessions.values()) {
+    if (promoted && !session.durable) {
       count += 1;
     }
   }
@@ -639,7 +651,7 @@ function moveToFinished(session: ProcessSession) {
   // Keep full completed logs; evict older records rather than silently
   // truncating the process poll/log contract or dropping the newest result.
   deleteFinishedSession(session.id);
-  const endedAt = Date.now();
+  const endedAt = session.endedAt ?? Date.now();
   finishedSessions.set(
     session.id,
     Object.assign(session, { endedAt, expiresAt: endedAt + session.cleanupMs }),
@@ -690,6 +702,7 @@ function resetProcessRegistryForTests() {
     active.settled?.resolve();
   }
   activeExecSessions.clear();
+  observeDurableProcesses = undefined;
   stopSweeper();
 }
 
@@ -709,11 +722,26 @@ function scheduleSweeper() {
       nextExpiration = Math.min(nextExpiration, session.expiresAt);
     }
   }
+  if (
+    observeDurableProcesses &&
+    [...activeExecSessions.values()].some(({ session }) => session.durable)
+  ) {
+    nextExpiration = Math.min(nextExpiration, now + 5_000);
+  }
   if (!Number.isFinite(nextExpiration)) {
     return;
   }
-  sweeper = setTimeout(scheduleSweeper, nextExpiration - now);
-  sweeper.unref?.();
+  sweeper = runInDetachedAsyncContext(() =>
+    setTimeout(() => {
+      const observation = observeDurableProcesses?.();
+      if (observation) {
+        void observation.then(scheduleSweeper, scheduleSweeper);
+      } else {
+        scheduleSweeper();
+      }
+    }, nextExpiration - now),
+  );
+  sweeper.unref();
 }
 
 function stopSweeper() {

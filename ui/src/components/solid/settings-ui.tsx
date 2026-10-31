@@ -21,6 +21,25 @@ const CARAPACE_STATUS_CLASS: Record<SettingsStatusKind, string> = {
   warn: "oc-status-warning",
 };
 
+export function RetryAction(props: {
+  onRetry: () => void;
+  label?: string;
+  class?: string;
+  type?: "button" | "submit" | "reset";
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      class={props.class ?? "btn btn--sm"}
+      type={props.type}
+      disabled={props.disabled}
+      onClick={() => props.onRetry()}
+    >
+      {props.label ?? t("common.retry")}
+    </button>
+  );
+}
+
 type SettingsRowProps = {
   title: JSX.Element;
   description?: JSX.Element;
@@ -255,6 +274,7 @@ export function SettingsNavRow(
 
 function ToggleControl(
   props: SettingsToggleControl & {
+    inputLabel?: string;
     label?: JSX.Element;
     labelledBy?: string;
     inputRef?: (element: HTMLInputElement) => void;
@@ -271,7 +291,8 @@ function ToggleControl(
         checked={props.checked}
         disabled={props.disabled}
         aria-disabled={props.saving ? "true" : undefined}
-        aria-labelledby={props.labelledBy ?? labelId}
+        aria-label={props.inputLabel}
+        aria-labelledby={props.inputLabel === undefined ? (props.labelledBy ?? labelId) : undefined}
         onClick={(event) => {
           const input = event.currentTarget;
           if (props.disabled || props.saving) {
@@ -314,7 +335,7 @@ function ToggleControl(
         }}
       />
       <span class="settings-toggle__control" aria-hidden="true" />
-      <Show when={!props.labelledBy}>
+      <Show when={props.inputLabel === undefined && !props.labelledBy}>
         <span id={labelId} class="settings-control__sr-label">
           {props.label}
         </span>
@@ -329,7 +350,7 @@ export function SettingsToggle(
     inputRef?: (element: HTMLInputElement) => void;
   },
 ) {
-  return <ToggleControl {...props} label={props.ariaLabel} />;
+  return <ToggleControl {...props} inputLabel={props.ariaLabel} />;
 }
 
 export function SettingsToggleRow(

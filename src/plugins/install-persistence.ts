@@ -44,8 +44,11 @@ import { loadPluginManifestRegistryCore } from "./manifest-registry.js";
 import { safeRealpathSync } from "./path-safety.js";
 import { createPluginCache, withPluginCache } from "./plugin-cache.js";
 import { resolvePluginConfigEnablement } from "./plugin-config-enablement.js";
-import { inspectPluginGenerationSources } from "./plugin-generation-source-inspection.js";
-import { withPluginLifecycleLease } from "./plugin-lifecycle-lease.js";
+import { inspectPluginGenerationSourcesAsync } from "./plugin-generation-worker.js";
+import {
+  withPluginLifecycleLeaseAsync,
+  type PluginMetadataLeaseContext,
+} from "./plugin-lifecycle-lease.js";
 import { tracePluginLifecyclePhaseAsync } from "./plugin-lifecycle-trace.js";
 import { loadPluginMetadataSnapshot } from "./plugin-metadata-snapshot.js";
 import { refreshPluginRegistryAfterConfigMutation } from "./registry-refresh.js";
@@ -207,14 +210,27 @@ type PluginInstallPersistenceParams = {
 export async function persistPluginInstall(
   params: PluginInstallPersistenceParams,
 ): Promise<OpenClawConfig> {
-  return await withPluginLifecycleLease({ env: params.env }, async (lease) =>
-    persistPluginInstallOwned(params, lease.assertOwned),
+  return await withPluginLifecycleLeaseAsync({ env: params.env }, async (lease) =>
+    persistPluginInstallOwned(
+      {
+        ...params,
+        beforePersistentApply: composeConfigWriteAssertions(
+          params.beforePersistentApply,
+          lease.assertCurrent,
+        ),
+        beforePersistentEffect: async () => {
+          await params.beforePersistentEffect?.();
+          await lease.assertOwned();
+        },
+      },
+      lease,
+    ),
   );
 }
 
 async function persistPluginInstallOwned(
   params: PluginInstallPersistenceParams,
-  assertOwned: () => void,
+  lease: PluginMetadataLeaseContext,
 ): Promise<OpenClawConfig> {
   let committed = false;
   let retainPublishedPayload = false;
@@ -312,12 +328,12 @@ async function persistPluginInstallOwned(
       const ownedPluginIds = manifests.map((plugin) => plugin.id).toSorted();
       const prepareMigration = async () => {
         const deferredPluginMigrations = await readDeferredPluginMigrationsAsync();
-        assertOwned();
+        await lease.assertOwned();
         params.beforePersistentApply?.();
         const prepared = await readConfigFileSnapshotForWrite({
           deferredPluginMigrations,
         });
-        assertOwned();
+        await lease.assertOwned();
         params.beforePersistentApply?.();
         if (
           params.snapshot.baseHash !== undefined &&
@@ -333,7 +349,7 @@ async function persistPluginInstallOwned(
           installRecords: nextInstallRecords,
           installOwners: [params.pluginId],
           assertCurrent: () => {
-            assertOwned();
+            lease.assertCurrent();
             params.beforePersistentApply?.();
             params.snapshot.writeOptions.assertConfigPathForWrite?.();
           },
@@ -438,7 +454,7 @@ async function persistPluginInstallOwned(
       next = withoutPluginInstallRecords(next);
       const enabled = new Set(enabledPluginIds);
       const source = params.deferRuntime
-        ? inspectPluginGenerationSources(
+        ? await inspectPluginGenerationSourcesAsync(
             manifests
               .filter((manifest) => enabled.has(manifest.id) && manifest.origin !== "bundled")
               .map((manifest) => ({
@@ -448,6 +464,10 @@ async function persistPluginInstallOwned(
               })),
           )
         : undefined;
+      if (params.deferRuntime) {
+        await lease.assertOwned();
+        params.beforePersistentApply?.();
+      }
       const commit = () =>
         tracePluginLifecyclePhaseAsync(
           "config mutation",
@@ -495,6 +515,7 @@ async function persistPluginInstallOwned(
           assertCurrent: params.beforePersistentApply,
         });
         // Publish and drain the previous generation before removing its source files.
+        await lease.assertOwned();
         await params.applyRuntime?.({
           config: next,
           write: receipt.configWrite,

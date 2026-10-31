@@ -14,11 +14,13 @@ import {
   type ResolveModulePreloadDependenciesFn,
   type UserConfig,
 } from "vite";
-import { mermaidClassicBundlePlugin } from "../packages/mermaid-renderer/vite-plugin.ts";
+import { peleClassicBundlePlugin } from "../packages/mermaid-renderer/vite-plugin.ts";
+import { isControlUiOptionalAsset } from "../scripts/lib/control-ui-optional-assets.ts";
 import {
   CONTROL_UI_BUILD_ID_ATTRIBUTE,
   isControlUiVersionedPublicAsset,
 } from "../src/gateway/control-ui-root-assets.ts";
+import { selectControlUiRoutePreloads } from "../src/gateway/control-ui-route-preloads.ts";
 import {
   collectControlUiBootAssets,
   controlUiBootPreloadsPlugin,
@@ -30,9 +32,11 @@ import {
 import { createControlUiDevGateway } from "./config/control-ui-dev-gateway.ts";
 import { controlUiHoverGuardPlugin } from "./config/control-ui-hover-guard.ts";
 import { controlUiLocaleModulesPlugin } from "./config/control-ui-locales.ts";
+import { controlUiNavigationPreloadsPlugin } from "./config/control-ui-navigation-preloads.ts";
 import { controlUiPluginDistributionsPlugin } from "./config/control-ui-plugin-distributions.ts";
 import { controlUiSocialCardPlugin } from "./config/control-ui-social-card.ts";
 import { controlUiSolidPlugin } from "./config/control-ui-solid.ts";
+import { extractControlUiStartupAssetPaths } from "./config/control-ui-startup-assets.ts";
 import { normalizeControlUiBuildInfo } from "./src/build-info-normalizers.ts";
 import type { ControlUiBuildInfo } from "./src/build-info.ts";
 
@@ -77,6 +81,8 @@ const controlUiPrecompressedAssetExtensions = new Set([
 ]);
 
 const compressBrotli = promisify(brotliCompress);
+// Small-asset sidecars waste entries in the installed package's updater budget.
+const CONTROL_UI_PRECOMPRESS_MIN_BYTES = 4096;
 
 function isControlUiPrecompressedAsset(fileName: string) {
   return (
@@ -88,12 +94,20 @@ function isControlUiPrecompressedAsset(fileName: string) {
 export async function createControlUiPrecompressedAssetVariants(
   fileName: string,
   source: string | Uint8Array,
+  startupAssets: ReadonlySet<string> = new Set(),
 ): Promise<Array<{ fileName: string; source: Buffer }>> {
   if (!isControlUiPrecompressedAsset(fileName)) {
     return [];
   }
   const body = typeof source === "string" ? Buffer.from(source) : source;
-  return [
+  if (
+    body.byteLength < CONTROL_UI_PRECOMPRESS_MIN_BYTES &&
+    path.extname(fileName).toLowerCase() !== ".css" &&
+    !startupAssets.has(fileName)
+  ) {
+    return [];
+  }
+  const variants = [
     {
       fileName: `${fileName}.br`,
       source: await compressBrotli(body, {
@@ -107,6 +121,7 @@ export async function createControlUiPrecompressedAssetVariants(
       source: Buffer.from(gzip(body, 11)),
     },
   ];
+  return variants.filter((variant) => variant.source.byteLength < body.byteLength);
 }
 
 function normalizeBase(input: string): string {
@@ -339,6 +354,8 @@ export function resolveSourcePackageAliasesForVite(): ControlUiViteAlias[] {
   return [
     sourcePackageAlias("normalization-core", "agent-id"),
     sourcePackageAlias("normalization-core", "code-points"),
+    sourcePackageAlias("normalization-core", "error-coercion"),
+    sourcePackageAlias("normalization-core", "expect"),
     sourcePackageAlias("normalization-core", "grapheme"),
     sourcePackageAlias("normalization-core", "json-coercion"),
     sourcePackageAlias("normalization-core", "json-schema"),
@@ -422,6 +439,7 @@ export async function refreshControlUiBuildOutput(
   buildInfo: ControlUiBuildInfo = resolveControlUiBuildInfo(),
   bootAssets?: string[],
   publicDir: string | false = path.join(here, "public"),
+  consumedInputs?: Set<string>,
 ) {
   const publicContent = publicDir ? collectControlUiPublicAssets(publicDir) : undefined;
   const publicAssets = publicContent?.paths ?? [];
@@ -475,10 +493,13 @@ export async function refreshControlUiBuildOutput(
   // Embed only build-owned HTML, never a fetched Gateway document (which may
   // contain identity, route metadata, or an HTTP login response). The measured
   // route graph also warms assets loaded before the first worker controls a tab.
-  const { module: routes } = await runnerImport<typeof import("./src/app-route-paths.ts")>(
-    path.join(here, "src/app-route-paths.ts"),
-    { configFile: false, resolve: { alias: resolveSourcePackageAliasesForVite() } },
-  );
+  const routePath = path.join(here, "src/app-route-paths.ts");
+  const { module: routes, dependencies: routeDependencies } = await runnerImport<
+    typeof import("./src/app-route-paths.ts")
+  >(routePath, { configFile: false, resolve: { alias: resolveSourcePackageAliasesForVite() } });
+  for (const file of [routePath, ...routeDependencies]) {
+    consumedInputs?.add(file);
+  }
   const offlineShell = {
     routes: routes.APP_ROUTE_PATHS,
     routePrefixes: routes.APP_ROUTE_OFFLINE_PREFIXES,
@@ -503,19 +524,49 @@ export async function refreshControlUiBuildOutput(
             .digest("base64"),
       })),
   };
+  const bootPaths = new Set(selectedBootAssets);
+  const deferredSize = { count: 0, rawBytes: 0, gzipBytes: 0 };
+  const deferredAssets = fs
+    .readdirSync(path.join(buildOutDir, "assets"))
+    .map((name) => `assets/${name}`)
+    .filter(
+      (file) =>
+        /^assets\/[^/]+-[\w-]{8,}\.(?:js|css)$/u.test(file) &&
+        !bootPaths.has(file) &&
+        !isControlUiOptionalAsset(file),
+    )
+    .toSorted()
+    .map((file) => {
+      const assetSource = fs.readFileSync(path.join(buildOutDir, file));
+      // Inventory must work before compression sidecars have been written.
+      deferredSize.count++;
+      deferredSize.rawBytes += assetSource.byteLength;
+      deferredSize.gzipBytes += gzip(assetSource, 11).byteLength;
+      return {
+        path: file,
+        integrity: "sha256-" + createHash("sha256").update(assetSource).digest("base64"),
+      };
+    });
   // Same-commit source rebuilds must not pair a new document with an old shell.
-  const { module: csp } = await runnerImport<typeof import("../src/gateway/control-ui-csp.ts")>(
-    path.join(repoRoot, "src/gateway/control-ui-csp.ts"),
-    { configFile: false, resolve: { alias: resolveSourcePackageAliasesForVite() } },
-  );
+  const cspPath = path.join(repoRoot, "src/gateway/control-ui-csp.ts");
+  const { module: csp, dependencies: cspDependencies } = await runnerImport<
+    typeof import("../src/gateway/control-ui-csp.ts")
+  >(cspPath, { configFile: false, resolve: { alias: resolveSourcePackageAliasesForVite() } });
+  for (const file of [cspPath, ...cspDependencies]) {
+    consumedInputs?.add(file);
+  }
   const offlineBuild = {
     ...offlineShell,
+    deferredAssets,
     csp: csp.buildControlUiCspHeader({
       inlineScriptHashes: csp.computeInlineScriptHashes(offlineShell.html),
     }),
     publicAssetVersion: cacheId,
     publicAssets: publicAssets.filter(isControlUiVersionedPublicAsset),
-    id: createHash("sha256").update(JSON.stringify(offlineShell)).digest("hex").slice(0, 16),
+    id: createHash("sha256")
+      .update(JSON.stringify({ ...offlineShell, deferredAssets }))
+      .digest("hex")
+      .slice(0, 16),
   };
   const offlinePlaceholder = "const OFFLINE_BOOT = null;";
   if (!source.includes(placeholder) || !source.includes(offlinePlaceholder)) {
@@ -526,38 +577,25 @@ export async function refreshControlUiBuildOutput(
     .replace(offlinePlaceholder, () => `const OFFLINE_BOOT = ${JSON.stringify(offlineBuild)};`);
   fs.mkdirSync(buildOutDir, { recursive: true });
   fs.writeFileSync(swPath, updated);
+  return deferredSize;
 }
 
-function controlUiBuildOutputPlugin(
-  buildInfo: ControlUiBuildInfo,
-  copiedInputs: Set<string>,
-): Plugin {
-  let publicDir: string | false = false;
+function controlUiPrecompressedAssetsPlugin(): Plugin {
   return {
-    name: "control-ui-build-output",
+    name: "control-ui-precompressed-assets",
     apply: "build",
-    configResolved(config) {
-      publicDir = (config.build.copyPublicDir && config.publicDir) || false;
-      for (const file of config.configFileDependencies) {
-        copiedInputs.add(file);
-      }
-    },
-    transformIndexHtml: {
-      order: "post",
-      handler(html) {
-        // Vite recreates the module entry tag from a fixed attribute set. Finalize every script
-        // after synthesis so Cloudflare Rocket Loader cannot defer the Control UI boot sequence.
-        const marked = html.replace(
-          /<script\b(?![^>]*\bdata-cfasync\s*=)/giu,
-          '<script data-cfasync="false"',
-        );
-        return controlUiBuildIdentityHtml(marked, buildInfo);
-      },
-    },
     async writeBundle({ dir: buildOutDir }, bundle) {
       if (!buildOutDir) {
         this.error("Control UI build requires an output directory");
       }
+      const startupAssets = new Set(
+        extractControlUiStartupAssetPaths(
+          selectControlUiRoutePreloads(
+            fs.readFileSync(path.join(buildOutDir, "index.html"), "utf8"),
+            null,
+          ),
+        ),
+      );
       const logger = this.environment.logger;
       let completed = 0;
       let sidecars = 0;
@@ -568,7 +606,11 @@ function controlUiBuildOutputPlugin(
         // later generateBundle hook. Read from disk here so sidecars always
         // encode the exact final bytes that the identity response serves.
         const source = fs.readFileSync(path.join(buildOutDir, output.fileName));
-        const variants = await createControlUiPrecompressedAssetVariants(output.fileName, source);
+        const variants = await createControlUiPrecompressedAssetVariants(
+          output.fileName,
+          source,
+          startupAssets,
+        );
         if (variants.length === 0) {
           return;
         }
@@ -602,25 +644,74 @@ function controlUiBuildOutputPlugin(
         }
       }
       logger.info(`Control UI precompression complete: ${completed} assets (${sidecars} sidecars)`);
-      const inputs = [...new Set([...this.getModuleIds(), ...copiedInputs])]
-        .map((file) => file.split("?")[0])
-        .filter((file): file is string => Boolean(file && path.isAbsolute(file)))
-        .map((file) => path.relative(repoRoot, file).split(path.sep).join("/"))
-        .filter(
-          (file) =>
-            !file.startsWith("../") &&
-            !file.includes("node_modules/") &&
-            fs.statSync(path.join(repoRoot, file), { throwIfNoEntry: false })?.isFile(),
-        )
-        .toSorted();
-      fs.writeFileSync(path.join(buildOutDir, ".build-inputs.json"), JSON.stringify(inputs));
-      const bootAssets = collectControlUiBootAssets(bundle);
-      await refreshControlUiBuildOutput(
-        buildOutDir,
-        buildInfo,
-        [...bootAssets.chat, ...bootAssets.new, ...bootAssets.login],
-        publicDir,
-      );
+    },
+  };
+}
+
+function controlUiBuildOutputPlugin(
+  buildInfo: ControlUiBuildInfo,
+  copiedInputs: Set<string>,
+): Plugin {
+  let publicDir: string | false = false;
+  return {
+    name: "control-ui-build-output",
+    apply: "build",
+    configResolved(config) {
+      publicDir = (config.build.copyPublicDir && config.publicDir) || false;
+      for (const file of config.configFileDependencies) {
+        copiedInputs.add(file);
+      }
+    },
+    transformIndexHtml: {
+      order: "post",
+      handler(html) {
+        // Vite recreates the module entry tag from a fixed attribute set. Finalize every script
+        // after synthesis so Cloudflare Rocket Loader cannot defer the Control UI boot sequence.
+        const marked = html.replace(
+          /<script\b(?![^>]*\bdata-cfasync\s*=)/giu,
+          '<script data-cfasync="false"',
+        );
+        // index.html owns the critical frame. Download the sole entry sheet
+        // without blocking its paint; the inline loader and main.ts admit it.
+        const nonblocking = marked.replace(
+          /<link\b(?=[^>]*\brel="stylesheet")[^>]*>/gu,
+          (link) =>
+            link.replace('rel="stylesheet"', 'rel="preload" as="style"') +
+            link.replace(/>$/u, ' id="openclaw-boot-styles" media="print">'),
+        );
+        return controlUiBuildIdentityHtml(nonblocking, buildInfo);
+      },
+    },
+    writeBundle: {
+      sequential: true,
+      async handler({ dir: buildOutDir }, bundle) {
+        if (!buildOutDir) {
+          this.error("Control UI build requires an output directory");
+        }
+        const bootAssets = collectControlUiBootAssets(bundle);
+        const deferred = await refreshControlUiBuildOutput(
+          buildOutDir,
+          buildInfo,
+          [...bootAssets.chat, ...bootAssets.new, ...bootAssets.login],
+          publicDir,
+          copiedInputs,
+        );
+        const inputs = [...new Set([...this.getModuleIds(), ...copiedInputs])]
+          .map((file) => file.split("?")[0])
+          .filter((file): file is string => Boolean(file && path.isAbsolute(file)))
+          .map((file) => path.relative(repoRoot, file).split(path.sep).join("/"))
+          .filter(
+            (file) =>
+              !file.startsWith("../") &&
+              !file.includes("node_modules/") &&
+              fs.statSync(path.join(repoRoot, file), { throwIfNoEntry: false })?.isFile(),
+          )
+          .toSorted();
+        fs.writeFileSync(path.join(buildOutDir, ".build-inputs.json"), JSON.stringify(inputs));
+        this.environment.logger.info(
+          `Control UI deferred offline inventory: ${deferred.count} assets, ${deferred.rawBytes} B raw, ${deferred.gzipBytes} B gzip`,
+        );
+      },
     },
   };
 }
@@ -682,7 +773,28 @@ export default function controlUiViteConfig(
       ? createControlUiDevGateway(process.env.OPENCLAW_UI_DEV_GATEWAY_URL)
       : undefined;
   const staticImports = new Map<string, readonly string[]>();
+  const styledChunks = new Set<string>();
+  const parallelStyleTargets = new Set<string>();
+  let composerMenuChunk: string | undefined;
+  let composerSubviewChunk: string | undefined;
+  const parallelStyleEntries = [
+    "/ui/src/pages/config/config-page.tsx",
+    "/ui/src/pages/usage/usage-page.tsx",
+    "/ui/src/components/board/board-view.tsx",
+    "/ui/src/pages/chat/components/chat-sidebar-region.runtime.tsx",
+  ];
   const copiedInputs = new Set<string>();
+  const collectStaticImports = (entry: string) => {
+    const loaded = new Set<string>();
+    const imports = [...(staticImports.get(entry) ?? [])];
+    for (const dependency of imports) {
+      if (!loaded.has(dependency)) {
+        loaded.add(dependency);
+        imports.push(...(staticImports.get(dependency) ?? []));
+      }
+    }
+    return loaded;
+  };
   const resolveModulePreloadDependencies: ResolveModulePreloadDependenciesFn = (
     filename,
     deps,
@@ -693,24 +805,32 @@ export default function controlUiViteConfig(
     }
     // The executing importer has already loaded its whole static JS graph.
     // Keep the lazy target, its other dependencies, and Vite's CSS preloads.
-    const loaded = new Set<string>();
-    const imports = [...(staticImports.get(context.hostId) ?? [])];
-    for (const dependency of imports) {
-      if (!loaded.has(dependency)) {
-        loaded.add(dependency);
-        imports.push(...(staticImports.get(dependency) ?? []));
+    const loaded = collectStaticImports(context.hostId);
+    // Vite removes CSS before calling this hook. Chunk metadata tells us when
+    // its stylesheet wait would otherwise delay fetching the target script.
+    // Keep optional artwork behind its existing wait so it cannot compete
+    // with foreground data on a slow connection.
+    const waitsForStyles =
+      parallelStyleTargets.has(filename) &&
+      (styledChunks.has(filename) ||
+        [...collectStaticImports(filename)].some((dep) => styledChunks.has(dep)));
+    // Warm the deep menu alongside its root import, without evaluating it or
+    // making every route download it. Selection then needs no serial fetch.
+    const candidates = new Set(deps);
+    if (filename === composerMenuChunk && composerSubviewChunk) {
+      candidates.add(composerSubviewChunk);
+      for (const dependency of collectStaticImports(composerSubviewChunk)) {
+        candidates.add(dependency);
       }
     }
-    // Without stylesheet waits, import() immediately fetches its own target.
-    // Keep the target preload when CSS would otherwise delay that request.
-    const waitsForStyles = deps.some((dep) => dep.endsWith(".css"));
-    return deps.filter((dep) => !loaded.has(dep) && (waitsForStyles || dep !== filename));
+    const dependencies = [...candidates].filter((dep) => !loaded.has(dep) && dep !== filename);
+    return waitsForStyles && !loaded.has(filename) ? [filename, ...dependencies] : dependencies;
   };
   return {
     base,
     worker: {
       format: "iife",
-      plugins: () => [mermaidClassicBundlePlugin()],
+      plugins: () => [peleClassicBundlePlugin()],
       rolldownOptions: {
         output: { codeSplitting: false },
       },
@@ -739,7 +859,9 @@ export default function controlUiViteConfig(
       ],
     },
     build: {
-      target: ["chrome147", "firefox150", "safari26.2"],
+      // iOS Safari is listed separately: desktop Safari alone lets the CSS minifier drop
+      // WebKit prefixes that only iOS reads, such as -webkit-text-size-adjust.
+      target: ["chrome147", "firefox150", "safari26.2", "ios26.2"],
       outDir: options.outDir ?? outDir,
       emptyOutDir: true,
       // The canonical sidecar performance report already measures shipped compressed bytes.
@@ -768,29 +890,67 @@ export default function controlUiViteConfig(
       host: devGateway ? "127.0.0.1" : true,
       port: 5173,
       strictPort: true,
-      // Chokidar selects FSEvents before reading its environment override on macOS.
-      ...(usePolling ? { watch: { usePolling: true } } : {}),
+      // FSEvents can delay or drop SSD edits under load. Native fs.watch keeps HMR
+      // prompt without polling the source tree; retain the explicit polling opt-in.
+      ...(process.platform === "darwin"
+        ? { watch: { useFsEvents: false, usePolling } }
+        : usePolling
+          ? { watch: { usePolling: true } }
+          : {}),
       ...(devGateway ? { proxy: devGateway.proxy } : {}),
     },
     plugins: [
       controlUiSolidPlugin(),
-      mermaidClassicBundlePlugin(),
+      peleClassicBundlePlugin(),
       controlUiIsolatedDesktopRuntimePlugin(),
       {
         name: "control-ui-static-import-preloads",
         generateBundle(_options, bundle) {
           staticImports.clear();
+          styledChunks.clear();
+          parallelStyleTargets.clear();
+          composerMenuChunk = undefined;
+          composerSubviewChunk = undefined;
           for (const chunk of Object.values(bundle)) {
             if (chunk.type === "chunk") {
               staticImports.set(chunk.fileName, chunk.imports);
+              for (const id of chunk.moduleIds) {
+                const source = id.replaceAll("\\", "/");
+                if (
+                  source.endsWith(
+                    "/ui/src/pages/chat/components/chat-composer-plus-menu-content.tsx",
+                  )
+                ) {
+                  composerMenuChunk = chunk.fileName;
+                }
+                if (
+                  source.endsWith(
+                    "/ui/src/pages/chat/components/chat-composer-plus-menu-subview.tsx",
+                  )
+                ) {
+                  composerSubviewChunk = chunk.fileName;
+                }
+              }
+              if (chunk.viteMetadata?.importedCss.size) {
+                styledChunks.add(chunk.fileName);
+              }
+              if (
+                chunk.moduleIds.some((id) =>
+                  parallelStyleEntries.some((entry) => id.replaceAll("\\", "/").endsWith(entry)),
+                )
+              ) {
+                parallelStyleTargets.add(chunk.fileName);
+              }
             }
           }
         },
       },
       controlUiSocialCardPlugin(),
-      controlUiLocaleModulesPlugin(),
+      controlUiLocaleModulesPlugin(copiedInputs),
       controlUiPluginDistributionsPlugin(repoRoot, copiedInputs),
       controlUiBootPreloadsPlugin(),
+      controlUiNavigationPreloadsPlugin(),
+      controlUiPrecompressedAssetsPlugin(),
       controlUiBuildOutputPlugin(buildInfo, copiedInputs),
       {
         name: "control-ui-dev-stubs",

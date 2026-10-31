@@ -57,6 +57,7 @@ export type ChatDetailsViewProps = {
   nativePresentation?: "desktop" | "mobile";
   mobileHost?: ChatMobileHost;
   mobileBindings?: MobileDetailsBindings;
+  contentPending?: boolean;
   conversationVisible?: boolean;
   conversationMain?: boolean;
   externalTrigger?: boolean;
@@ -129,8 +130,18 @@ export function ChatDetails(props: ChatDetailsViewProps) {
         props.mobileHost.destination.area === "details" &&
         (!props.mobileHost.destination.page || Boolean(props.mobileHost.destination.page.details))
       : intent() === "open" || (intent() === "auto" && canDock()));
-  // Load on first presentation, then retain disclosure state while closed.
-  const [sessionOpened] = createSignal<boolean>((previous) => previous === true || opened());
+  const outputsDemand = createMemo(() =>
+    desktop() && opened() && props.chat?.outputs ? props.chat.retainOutputs : undefined,
+  );
+  // Mount cached chrome with the transcript; retain disclosure state while closed.
+  const cachedReady = () =>
+    props.chat?.cachedDetails?.subagents !== undefined &&
+    props.chat.cachedDetails.automations !== undefined;
+  const [sessionOpened] = createSignal<boolean>(
+    (previous) =>
+      previous ||
+      (opened() && (!props.contentPending || cachedReady() || intent() === "open" || !desktop())),
+  );
   const docked = () => opened() && canDock();
   const surface = document.createElement("div");
   surface.style.display = "contents";
@@ -192,9 +203,6 @@ export function ChatDetails(props: ChatDetailsViewProps) {
     }
     const pane = elements?.pane;
     const frame = elements?.frame;
-    const footerBounds = conversationVisible
-      ? elements?.footer?.getBoundingClientRect()
-      : undefined;
     const bounds = (
       mobile ? (pane ?? frame) : conversationVisible ? frame : (pane ?? host)
     )?.getBoundingClientRect();
@@ -226,12 +234,15 @@ export function ChatDetails(props: ChatDetailsViewProps) {
       frame?.style.setProperty("--chat-details-frame-width", `${dockingWidth}px`);
     }
     setWideEnough(dockingWidth >= DETAILS_DOCK_MIN_WIDTH);
+    if (!open) {
+      return;
+    }
+    const footerBounds = conversationVisible
+      ? elements?.footer?.getBoundingClientRect()
+      : undefined;
     if (isDesktop) {
       // Measure the conversation owner, never the moving Details surface. Its
       // reservation changes the composer width, but not this frame's width.
-      if (!open) {
-        return;
-      }
       const composer = conversationVisible
         ? elements?.getComposerInput?.()?.getBoundingClientRect()
         : undefined;
@@ -481,7 +492,8 @@ export function ChatDetails(props: ChatDetailsViewProps) {
     mountSurface(layout);
     position(layout);
   };
-  createResizeObserver(
+  // Parent snapshots may change while these native observation targets stay the same.
+  const resizeTargets = createMemo(
     () =>
       [
         props.elements?.pane,
@@ -490,8 +502,13 @@ export function ChatDetails(props: ChatDetailsViewProps) {
         props.elements?.footer,
         props.elements?.getComposerInput?.(),
       ].filter((element): element is HTMLElement => Boolean(element)),
-    reposition,
+    {
+      lazy: true,
+      equals: (before, after) =>
+        before.length === after.length && before.every((el, i) => el === after[i]),
+    },
   );
+  createResizeObserver(resizeTargets, reposition);
   onSettled(() => {
     props.setRef({ open: openFrom, close: () => close(true) });
     const pane = layoutElements()?.pane;
@@ -501,6 +518,8 @@ export function ChatDetails(props: ChatDetailsViewProps) {
     if (pane && desktop()) {
       layout.observe(pane, { attributes: true, attributeFilter: ["class", "style"] });
     }
+    // Resolve automatic docking before paint, including adaptive panes whose
+    // first ResizeObserver delivery may be delayed in a background tab.
     reposition();
     const stop = [
       listen(window, "resize", reposition),
@@ -536,7 +555,9 @@ export function ChatDetails(props: ChatDetailsViewProps) {
       <Show when={sessionOpened()}>
         <ChatLazyBoundary
           fallback={
-            <PanelLoadingSkeleton variant="file-list" label={t("common.loading")} compact />
+            !cachedReady() && (
+              <PanelLoadingSkeleton variant="file-list" label={t("common.loading")} compact />
+            )
           }
         >
           {content.children}
@@ -549,6 +570,12 @@ export function ChatDetails(props: ChatDetailsViewProps) {
       ref={(element) => (host = element)}
       mobile={props.mobile ? "" : undefined}
     >
+      <Show when={outputsDemand()} keyed>
+        {(retain) => {
+          onSettled(retain);
+          return null;
+        }}
+      </Show>
       <button
         ref={(element) => (trigger = element)}
         class="chat-details-toggle"
